@@ -202,3 +202,52 @@ pub fn calculate_freshness_score(
         (score / compared as f64, compared)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn packages(entries: &[(&str, i64)]) -> PackageBuildDates {
+        PackageBuildDates {
+            packages: entries
+                .iter()
+                .map(|(name, timestamp)| ((*name).to_string(), *timestamp))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn build_date_parser_reads_pacman_desc_field() {
+        let desc = b"%NAME%\nexample\n\n%BUILDDATE%\n1720000000\n";
+        assert_eq!(extract_build_date(desc), Some(1_720_000_000));
+    }
+
+    #[test]
+    fn build_date_parser_rejects_missing_or_invalid_values() {
+        assert_eq!(extract_build_date(b"%NAME%\nexample\n"), None);
+        assert_eq!(extract_build_date(b"%BUILDDATE%\nnot-a-number\n"), None);
+    }
+
+    #[test]
+    fn score_rewards_newer_and_equal_packages() {
+        let reference = packages(&[("newer", 10), ("equal", 20), ("older", 30)]);
+        let mirror = packages(&[("newer", 11), ("equal", 20), ("older", 29)]);
+        let (score, compared) = calculate_freshness_score(&mirror, &reference);
+        assert_eq!(compared, 3);
+        assert!((score - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn score_ignores_packages_missing_from_the_mirror() {
+        let reference = packages(&[("present", 10), ("missing", 20)]);
+        let mirror = packages(&[("present", 10)]);
+        assert_eq!(calculate_freshness_score(&mirror, &reference), (1.0, 1));
+    }
+
+    #[test]
+    fn score_is_zero_when_no_packages_overlap() {
+        let reference = packages(&[("reference-only", 10)]);
+        let mirror = packages(&[("mirror-only", 20)]);
+        assert_eq!(calculate_freshness_score(&mirror, &reference), (0.0, 0));
+    }
+}

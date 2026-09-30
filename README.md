@@ -1,5 +1,29 @@
 # Rate Mirrors
 
+> **Portfolio fork:** This fork adds freshness-aware ranking for pacman-based mirrors. Brandon Walker implemented package-database download/parsing, concurrent freshness checks, scoring and fallback behavior, target integration, and configuration options. The original mirror discovery and speed-ranking project is maintained by [westandskif](https://github.com/westandskif/rate-mirrors).
+
+## Freshness Extension
+
+Speed alone can select a responsive mirror whose package database is behind. This branch compares each candidate mirror's repository database with the local pacman sync database, then orders the final candidates by freshness, number of packages compared, and speed.
+
+Supported archive formats are zstd-compressed tar, gzip-compressed tar, and raw tar. The check runs concurrently and degrades gracefully when a mirror cannot be checked. It is enabled by default for ten pacman-based targets and can be disabled explicitly:
+
+```bash
+cargo build --release --locked
+./target/release/rate-mirrors arch
+./target/release/rate-mirrors --freshness-check=false arch
+```
+
+See [Freshness Integration](FRESHNESS_INTEGRATION.md) for the design, supported targets, configuration, and changed modules. Run the focused unit tests with:
+
+```bash
+cargo test freshness
+```
+
+Everything below is the upstream project documentation and describes functionality inherited from `westandskif/rate-mirrors`.
+
+---
+
 **former Rate Arch Mirrors (changed in v0.4.0)** - [previous README](https://github.com/westandskif/rate-mirrors/blob/98f6417ff30b5148ab80f742c8eb729b78ca20c1/README.md)
 
 ![Tag Badge](https://img.shields.io/github/tag/westandskif/rate-mirrors.svg)
