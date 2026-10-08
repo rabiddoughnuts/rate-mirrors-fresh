@@ -19,6 +19,8 @@ or `RATE_MIRRORS_BASE_PATH` override selects a repository base for both probes:
 `extra/os/x86_64/extra` becomes `extra/os/x86_64/extra.files` and
 `extra/os/x86_64/extra.db`. Without an override, the normal upstream `.files`
 URL is used and its `.db` sibling is inferred.
+For Manjaro, the selected branch remains between the mirror URL and the
+overridden repository base path.
 
 ### 3. Mirror Structure (`src/mirror.rs`)
 The database URL and reference database name are derived from each mirror's

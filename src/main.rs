@@ -150,9 +150,17 @@ fn apply_base_path_override(mirrors: &mut [Mirror], base_path: &str) -> Result<(
     Ok(())
 }
 
+fn probe_base_path(target: &Target, base_path: &str) -> String {
+    match target {
+        Target::Manjaro(manjaro) => format!("{}/{}", manjaro.branch, base_path),
+        _ => base_path.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
 
     struct TestFormatter;
 
@@ -219,6 +227,16 @@ mod tests {
             "https://mirror.example/repo/x86_64/cachyos/cachyos.db"
         );
     }
+
+    #[test]
+    fn manjaro_override_keeps_the_selected_branch() {
+        let config =
+            Config::try_parse_from(["rate-mirrors", "manjaro", "--branch", "testing"]).unwrap();
+        assert_eq!(
+            probe_base_path(&config.target, "extra/x86_64/extra"),
+            "testing/extra/x86_64/extra"
+        );
+    }
 }
 
 fn main() -> Result<(), AppError> {
@@ -263,7 +281,10 @@ fn run() -> Result<(), AppError> {
         // --base-path override retains this fork's repository-path option.
         if let Some(base_path) = &config.base_path {
             if config.target.supports_freshness() {
-                apply_base_path_override(&mut mirrors, base_path)?;
+                apply_base_path_override(
+                    &mut mirrors,
+                    &probe_base_path(&config.target, base_path),
+                )?;
             }
         }
 
