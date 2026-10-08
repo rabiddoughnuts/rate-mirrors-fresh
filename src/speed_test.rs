@@ -29,15 +29,8 @@ pub struct SpeedTestResult {
     pub files_elapsed: Duration,
     pub files_connection_time: Duration,
     pub item: Mirror,
-    pub freshness_score: Option<f64>,
-    pub local_missing_packages: Option<usize>,
-    pub relative_freshness_score: Option<f64>,
     pub freshness_quality: Option<f64>,
-    pub relative_missing_packages: Option<usize>,
-    pub relative_lag_seconds: Option<u64>,
     pub latest_build_date: Option<i64>,
-    pub freshness_packages_compared: Option<usize>,
-    pub freshness_error: Option<String>,
     pub freshness_packages: Option<freshness::PackageBuildDates>,
 }
 impl SpeedTestResult {
@@ -60,15 +53,8 @@ impl SpeedTestResult {
             } else {
                 bytes_downloaded as f64 / elapsed.as_secs_f64()
             },
-            freshness_score: None,
-            local_missing_packages: None,
-            relative_freshness_score: None,
             freshness_quality: None,
-            relative_missing_packages: None,
-            relative_lag_seconds: None,
             latest_build_date: None,
-            freshness_packages_compared: None,
-            freshness_error: None,
             freshness_packages: None,
         }
     }
@@ -315,14 +301,8 @@ async fn test_single_mirror(
                 if let Some(transfer) = &check_result.transfer {
                     include_db_transfer_in_speed(&mut speed_test_result, transfer);
                 }
-                speed_test_result.freshness_score = Some(check_result.score);
-                speed_test_result.local_missing_packages =
-                    Some(check_result.reference_packages - check_result.packages_compared);
-                speed_test_result.freshness_packages_compared =
-                    Some(check_result.packages_compared);
                 speed_test_result.freshness_packages = check_result.packages;
             }
-            speed_test_result.freshness_error = check_result.error;
         }
     }
 
@@ -763,9 +743,6 @@ pub fn test_speed_by_countries(
                 let (age_days, missing, lag_seconds) =
                     freshness::calculate_relative_freshness_score(&packages, &frontier);
                 let quality = freshness_quality(age_days, missing, frontier.packages.len());
-                result.relative_freshness_score = Some(age_days);
-                result.relative_missing_packages = Some(missing);
-                result.relative_lag_seconds = Some(lag_seconds);
                 result.freshness_quality = Some(quality);
                 result.latest_build_date = packages.latest_build_date();
                 let latest_build_display = result
