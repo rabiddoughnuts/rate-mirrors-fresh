@@ -395,17 +395,6 @@ fn run() -> Result<(), AppError> {
             }
         }
 
-        if require_verified_freshness {
-            if let Some(mirror) = mirrors
-                .iter()
-                .find(|mirror| mirror.repository_base_path().is_none())
-            {
-                return Err(AppError::InvalidFreshnessProbePath(
-                    mirror.url_to_test.to_string(),
-                ));
-            }
-        }
-
         // Centralized protocol filtering
         let before_protocol = mirrors.len();
         mirrors.retain(|m| config.is_protocol_allowed_for_url(&m.url));
@@ -460,6 +449,17 @@ fn run() -> Result<(), AppError> {
                     mirrors.len()
                 ))
                 .unwrap();
+        }
+
+        if require_verified_freshness {
+            if let Some(mirror) = mirrors
+                .iter()
+                .find(|mirror| mirror.repository_base_path().is_none())
+            {
+                return Err(AppError::InvalidFreshnessProbePath(
+                    mirror.url_to_test.to_string(),
+                ));
+            }
         }
 
         // sending filtered mirrors back so we have a fallback in case if all tests fail

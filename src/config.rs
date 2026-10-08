@@ -193,7 +193,7 @@ pub enum Target {
 
 impl Target {
     pub fn supports_freshness(&self) -> bool {
-        !matches!(self, Self::Stdin(_) | Self::OpenBSD(_) | Self::ArcoLinux(_))
+        self.freshness_probe_path().is_some()
     }
 
     pub fn freshness_probe_path(&self) -> Option<&str> {
