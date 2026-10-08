@@ -1,4 +1,6 @@
 /target
+/benchmark-results/
+__pycache__/
 tags
 .s.vim
 .notes

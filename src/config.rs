@@ -2,8 +2,8 @@ use crate::mirror::Mirror;
 use crate::target_configs::archarm::ArcharmTarget;
 use crate::target_configs::archlinux::ArchTarget;
 use crate::target_configs::archlinuxcn::ArchCNTarget;
-use crate::target_configs::artix::ArtixTarget;
 use crate::target_configs::arcolinux::ArcoLinuxTarget;
+use crate::target_configs::artix::ArtixTarget;
 use crate::target_configs::blackarch::BlackArchTarget;
 use crate::target_configs::cachyos::CachyOSTarget;
 use crate::target_configs::chaotic::ChaoticTarget;
@@ -14,12 +14,12 @@ use crate::target_configs::openbsd::OpenBSDTarget;
 use crate::target_configs::rebornos::RebornOSTarget;
 use crate::target_configs::stdin::StdinTarget;
 // use crate::target_configs::ubuntu::UbuntuTarget;
-use ambassador::{delegatable_trait, Delegate};
+use ambassador::{Delegate, delegatable_trait};
 use clap::{Parser, Subcommand};
 use itertools::Itertools;
 use std::fmt;
 use std::str::FromStr;
-use std::sync::{mpsc, Arc};
+use std::sync::{Arc, mpsc};
 use thiserror::Error;
 use url::Url;
 
@@ -27,6 +27,37 @@ use url::Url;
 pub enum Protocol {
     Http,
     Https,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum FreshnessMode {
+    Off,
+    On(f64),
+}
+
+impl FreshnessMode {
+    pub fn is_enabled(self) -> bool {
+        matches!(self, Self::On(_))
+    }
+
+    pub fn speed_weight(self) -> f64 {
+        match self {
+            Self::Off => 1.0,
+            Self::On(weight) => weight,
+        }
+    }
+}
+
+impl FromStr for FreshnessMode {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.to_ascii_lowercase().as_str() {
+            "off" | "false" => Ok(Self::Off),
+            "on" | "true" => Ok(Self::On(1.0)),
+            _ => parse_speed_weight(value).map(Self::On),
+        }
+    }
 }
 
 impl FromStr for Protocol {
@@ -50,6 +81,10 @@ pub enum AppError {
     RequestError(String),
     #[error("no mirrors after filtering")]
     NoMirrorsAfterFiltering,
+    #[error(
+        "no mirrors passed the requested freshness check; existing mirrorlists were not replaced"
+    )]
+    NoFreshMirrorsVerified,
     #[error(transparent)]
     UrlParseError(#[from] url::ParseError),
     #[error(transparent)]
@@ -271,25 +306,39 @@ pub struct Config {
     #[arg(env = "RATE_MIRRORS_DISABLE_COMMENTS_IN_FILE", long)]
     pub disable_comments_in_file: bool,
 
-        /// Enable freshness checking for mirrors (supported targets only)
-        #[arg(env = "RATE_MIRRORS_FRESHNESS_CHECK", long, default_value = "true")]
-        pub freshness_check: bool,
+    /// Enable freshness with optional speed priority (0-1); bare flag uses 1
+    #[arg(
+        env = "RATE_MIRRORS_FRESHNESS_CHECK",
+        long,
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "1",
+        default_value = "off"
+    )]
+    pub freshness_check: FreshnessMode,
 
-        /// Path to local reference database directory
-        #[arg(
-            env = "RATE_MIRRORS_REF_LOCAL_DIR",
-            long,
-            default_value = "/var/lib/pacman/sync"
-        )]
-        pub ref_local_dir: String,
+    /// Path to local reference database directory
+    #[arg(
+        env = "RATE_MIRRORS_REF_LOCAL_DIR",
+        long,
+        default_value = "/var/lib/pacman/sync"
+    )]
+    pub ref_local_dir: String,
 
-        /// Timeout for freshness check downloads in milliseconds
-        #[arg(
-            env = "RATE_MIRRORS_FRESHNESS_TIMEOUT",
-            long,
-            default_value = "15000"
-        )]
-        pub freshness_timeout: u64,
+    /// Timeout for freshness check downloads in milliseconds
+    #[arg(env = "RATE_MIRRORS_FRESHNESS_TIMEOUT", long, default_value = "15000")]
+    pub freshness_timeout: u64,
+}
+
+fn parse_speed_weight(value: &str) -> Result<f64, String> {
+    let weight = value
+        .parse::<f64>()
+        .map_err(|_| "speed weight must be a number from 0 to 1".to_string())?;
+    if weight.is_finite() && (0.0..=1.0).contains(&weight) {
+        Ok(weight)
+    } else {
+        Err("speed weight must be a number from 0 to 1".to_string())
+    }
 }
 
 impl Config {
@@ -315,5 +364,48 @@ impl Config {
                 _ => 2,
             })
             .next()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn freshness_is_opt_in_and_weight_has_defined_endpoints() {
+        let default = Config::try_parse_from(["rate-mirrors", "arch"]).unwrap();
+        assert_eq!(default.freshness_check, FreshnessMode::Off);
+
+        let bare = Config::try_parse_from(["rate-mirrors", "--freshness-check", "arch"]).unwrap();
+        assert_eq!(bare.freshness_check, FreshnessMode::On(1.0));
+        let weighted =
+            Config::try_parse_from(["rate-mirrors", "--freshness-check=0.9", "arch"]).unwrap();
+        assert_eq!(weighted.freshness_check, FreshnessMode::On(0.9));
+        let freshness_first =
+            Config::try_parse_from(["rate-mirrors", "--freshness-check=0", "arch"]).unwrap();
+        assert_eq!(freshness_first.freshness_check, FreshnessMode::On(0.0));
+        let benchmark = Config::try_parse_from([
+            "rate-mirrors",
+            "--freshness-check=0.5",
+            "--top-mirrors-number-to-retest=0",
+            "arch",
+        ])
+        .unwrap();
+        assert_eq!(benchmark.top_mirrors_number_to_retest, 0);
+        assert_eq!(
+            "true".parse::<FreshnessMode>().unwrap(),
+            FreshnessMode::On(1.0)
+        );
+        assert_eq!(
+            "false".parse::<FreshnessMode>().unwrap(),
+            FreshnessMode::Off
+        );
+    }
+
+    #[test]
+    fn freshness_weight_rejects_out_of_range_and_nonfinite_values() {
+        for value in ["-0.1", "1.1", "NaN", "inf", "oops"] {
+            assert!(value.parse::<FreshnessMode>().is_err(), "{value}");
+        }
     }
 }

@@ -1,24 +1,62 @@
 # Rate Mirrors
 
-> **Portfolio fork:** This fork adds freshness-aware ranking for pacman-based mirrors. Brandon Walker implemented package-database download/parsing, concurrent freshness checks, scoring and fallback behavior, target integration, and configuration options. The original mirror discovery and speed-ranking project is maintained by [westandskif](https://github.com/westandskif/rate-mirrors).
+> **Portfolio fork:** This fork adds freshness-aware ranking for pacman-based mirrors. Brandon Walker implemented package-database download/parsing, concurrent freshness checks, scoring, target integration, and configuration options. The original mirror discovery and speed-ranking project is maintained by [westandskif](https://github.com/westandskif/rate-mirrors).
 
 ## Freshness Extension
 
-Speed alone can select a responsive mirror whose package database is behind. This branch compares each candidate mirror's repository database with the local pacman sync database, then orders the final candidates by freshness, number of packages compared, and speed.
+Speed alone can select a responsive mirror whose package database is behind. Freshness checking is optional. When enabled, each mirror reached by the existing map-aware explorer is measured with `.files` for speed and then checked with `.db` for package freshness before final ranking. The local DB and checked mirrors together form a per-package newest-build reference, so packages absent from the local DB can still affect ranking. Build-date differences are reported as signed days averaged across matching packages: 0 means equal age, +1 means one day newer, and -0.1 means 2.4 hours older. Mirrors whose DB checks fail are excluded.
 
-Supported archive formats are zstd-compressed tar, gzip-compressed tar, and raw tar. The check runs concurrently and degrades gracefully when a mirror cannot be checked. It is enabled by default for ten pacman-based targets and can be disabled explicitly:
+The latest package build timestamp is not a true mirror last-sync timestamp: a mirror could have one recently built package while other packages lag. A shared HTTP client can reuse connections when the server permits it, the local reference DB is parsed once per repo path, and compressed archives are parsed as streams to reduce memory use. At most eight `.db` downloads run concurrently. When freshness is enabled, the speed sample uses total bytes divided by total transfer time across `.files` and `.db`; with freshness off, only `.files` is used. The optional value on `--freshness-check` sets speed priority from 0 to 1:
 
 ```bash
 cargo build --release --locked
-./target/release/rate-mirrors arch
-./target/release/rate-mirrors --freshness-check=false arch
+./target/release/rate_mirrors arch  # speed-only default
+./target/release/rate_mirrors --freshness-check arch       # speed priority 1
+./target/release/rate_mirrors --freshness-check=0.9 arch
+./target/release/rate_mirrors --freshness-check=0.1 cachyos
 ```
+
+At 1, speed determines order and freshness breaks exact ties; at 0, freshness determines order and speed breaks ties. Between them, normalized speed and freshness quality are blended. Freshness quality is package coverage divided by `1 + average days behind the per-package newest reference`, so a complete mirror one day behind scores 0.5. Geographic exploration still uses speed, even at weight 0. This opt-in mode downloads `.db` for every speed-tested mirror, which can use substantial bandwidth. The top `--top-mirrors-number-to-retest` candidates are chosen by the weighted initial score and receive a serial `.files` speed retest; the `.db` is not downloaded again. Final ranking uses the verified freshness and the new `.files` speed for retested candidates, with initial `.files` speed for the rest. Set the retest count to 0 to keep the initial combined `.files` + `.db` speeds throughout.
 
 See [Freshness Integration](FRESHNESS_INTEGRATION.md) for the design, supported targets, configuration, and changed modules. Run the focused unit tests with:
 
 ```bash
 cargo test freshness
 ```
+
+To measure how much extra exploration helps on your own connection, run the
+one-variable-at-a-time benchmark. It tests one value below the stock v0.31
+default, that default, and two above for country jumps (4/7/10/14), mirrors per
+country (1/2/4/8), and neighbors per country (1/3/5/8). The benchmark
+explicitly passes the stock baseline for every unchanged exploration setting,
+even though this fork's compiled defaults are different. Freshness is always
+on, and the existing retest count is set to 0 to isolate the initial pass.
+This isolates exploration defaults; it does not measure the production retest
+count or the effect of second-pass speed changes.
+
+Each session writes a shareable `report.md` and machine-readable `report.json`
+under a new `benchmark-results/` directory. The report includes UTC timing,
+approximate network location, binary version and hash, settings and mirror
+counts per run, and separate speed and freshness rankings. Raw logs are
+optional (`--keep-logs`); mirrorlists are never saved.
+By default the tool makes one HTTPS lookup at `https://ipapi.co/json/` to
+estimate city/region/country/ASN and chooses its country as the explorer's entry
+country. This sends the public IP to that provider, but the report does not
+retain the IP. Use `--no-location-lookup --entry-country=US` to avoid the
+lookup; IP geolocation can be wrong for VPNs or proxies.
+
+```bash
+python3 scripts/benchmark_exploration.py --dry-run
+python3 scripts/benchmark_exploration.py --target cachyos --repeats 3
+```
+
+One full sweep is 12 configurations per repeat and can use substantial bandwidth
+because each checked mirror downloads a `.db`. Compare new mirrors and elapsed
+time against top-speed and top-freshness gains. Repeat before treating a small
+difference as a real threshold; network conditions and upstream mirror
+availability can change between runs. Speeds use the initial combined `.files`
+and `.db` transfers. Freshness quality uses a per-run package frontier, so its
+absolute values are not directly comparable between runs.
 
 Everything below is the upstream project documentation and describes functionality inherited from `westandskif/rate-mirrors`.
 
