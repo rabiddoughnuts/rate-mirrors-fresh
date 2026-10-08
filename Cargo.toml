@@ -29,3 +29,4 @@ clap = { version = "4.5.31", features = ["derive", "unstable-doc", "env"] }
 tar = "0.4"
 zstd = "0.13"
 flate2 = "1"
+tempfile = "3"

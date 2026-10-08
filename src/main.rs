@@ -18,9 +18,10 @@ use mirror::Mirror;
 use nix::unistd::Uid;
 use std::env;
 use std::fmt::Display;
-use std::fs::File;
+use std::fs;
 use std::io;
 use std::io::prelude::*;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc;
 use std::thread;
@@ -120,13 +121,38 @@ impl<'a, T: LogFormatter> OutputSink<'a, T> {
                         "refusing to save an invalid pacman mirrorlist",
                     ));
                 }
-                let mut f = File::create(filename)?;
-                f.write_all(output_lines.join("\n").as_bytes())?;
-                f.write_all("\n".as_bytes())?;
+                save_atomically(filename, &format!("{}\n", output_lines.join("\n")))?;
             }
         }
         return Ok(());
     }
+}
+
+fn save_atomically(filename: &str, contents: &str) -> io::Result<()> {
+    let requested = Path::new(filename);
+    // Preserve the old behavior of writing through an existing symlink.
+    let target: PathBuf = match fs::symlink_metadata(requested) {
+        Ok(metadata) if metadata.file_type().is_symlink() => fs::canonicalize(requested)?,
+        Ok(_) => requested.to_path_buf(),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => requested.to_path_buf(),
+        Err(error) => return Err(error),
+    };
+    let parent = target
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+    match fs::metadata(&target) {
+        Ok(metadata) => temporary
+            .as_file()
+            .set_permissions(metadata.permissions())?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => (),
+        Err(error) => return Err(error),
+    }
+    temporary.write_all(contents.as_bytes())?;
+    temporary.as_file().sync_all()?;
+    temporary.persist(&target).map_err(|error| error.error)?;
+    Ok(())
 }
 
 fn valid_pacman_line(line: &str) -> bool {
@@ -155,6 +181,17 @@ fn probe_base_path(target: &Target, base_path: &str) -> String {
         Target::Manjaro(manjaro) => format!("{}/{}", manjaro.branch, base_path),
         _ => base_path.to_string(),
     }
+}
+
+fn validate_freshness_probe(config: &Config) -> Result<(), AppError> {
+    if config.freshness_check.is_enabled() && config.base_path.is_none() {
+        if let Some(path) = config.target.freshness_probe_path() {
+            if !path.ends_with(".files") {
+                return Err(AppError::InvalidFreshnessProbePath(path.to_string()));
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -211,6 +248,50 @@ mod tests {
     }
 
     #[test]
+    fn save_replaces_existing_file_and_keeps_its_permissions() {
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("mirrorlist");
+        fs::write(&destination, "old list\n").unwrap();
+        let permissions = fs::metadata(&destination).unwrap().permissions();
+        let mut output = OutputSink::new(
+            &TestFormatter,
+            Some(destination.to_str().unwrap()),
+            false,
+            false,
+            true,
+        )
+        .unwrap();
+        output.output_lines = Some(vec!["Server = https://example.org/$repo/os/$arch".into()]);
+        output.save_to_file().unwrap();
+        assert_eq!(
+            fs::read_to_string(&destination).unwrap(),
+            "Server = https://example.org/$repo/os/$arch\n"
+        );
+        assert_eq!(
+            fs::metadata(&destination).unwrap().permissions(),
+            permissions
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_save_writes_through_existing_symlink() {
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("mirrorlist");
+        let link = directory.path().join("linked-mirrorlist");
+        fs::write(&destination, "old list\n").unwrap();
+        std::os::unix::fs::symlink(&destination, &link).unwrap();
+        save_atomically(link.to_str().unwrap(), "new list\n").unwrap();
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(fs::read_to_string(&destination).unwrap(), "new list\n");
+    }
+
+    #[test]
     fn base_path_override_updates_both_probe_urls() {
         let mut mirrors = vec![Mirror {
             url: url::Url::parse("https://mirror.example/repo/").unwrap(),
@@ -237,6 +318,31 @@ mod tests {
             "testing/extra/x86_64/extra"
         );
     }
+
+    #[test]
+    fn custom_non_files_probe_cannot_silently_bypass_freshness() {
+        let invalid = Config::try_parse_from([
+            "rate-mirrors",
+            "--freshness-check",
+            "arch",
+            "--path-to-test",
+            "test.iso",
+        ])
+        .unwrap();
+        assert!(matches!(
+            validate_freshness_probe(&invalid),
+            Err(AppError::InvalidFreshnessProbePath(_))
+        ));
+        let valid = Config::try_parse_from([
+            "rate-mirrors",
+            "--freshness-check",
+            "arch",
+            "--path-to-test",
+            "extra.files",
+        ])
+        .unwrap();
+        validate_freshness_probe(&valid).unwrap();
+    }
 }
 
 fn main() -> Result<(), AppError> {
@@ -255,6 +361,7 @@ fn run() -> Result<(), AppError> {
     let pacman_mirrorlist = !matches!(&config.target, Target::Stdin(_) | Target::OpenBSD(_));
     let require_verified_freshness =
         config.freshness_check.is_enabled() && config.target.supports_freshness();
+    validate_freshness_probe(&config)?;
     let disable_untested_fallback = config.disable_untested_fallback;
 
     let ref formatter = Arc::clone(&config).target;
@@ -285,6 +392,17 @@ fn run() -> Result<(), AppError> {
                     &mut mirrors,
                     &probe_base_path(&config.target, base_path),
                 )?;
+            }
+        }
+
+        if require_verified_freshness {
+            if let Some(mirror) = mirrors
+                .iter()
+                .find(|mirror| mirror.repository_base_path().is_none())
+            {
+                return Err(AppError::InvalidFreshnessProbePath(
+                    mirror.url_to_test.to_string(),
+                ));
             }
         }
 

@@ -92,6 +92,10 @@ pub enum AppError {
         "no mirrors passed the requested freshness check; existing mirrorlists were not replaced"
     )]
     NoFreshMirrorsVerified,
+    #[error(
+        "freshness checking requires a .files probe path, got {0}; use --path-to-test ending in .files or --base-path"
+    )]
+    InvalidFreshnessProbePath(String),
     #[error("all speed tests failed")]
     SpeedTestsFailed,
     #[error("no mirror output produced")]
@@ -191,6 +195,23 @@ impl Target {
     pub fn supports_freshness(&self) -> bool {
         !matches!(self, Self::Stdin(_) | Self::OpenBSD(_) | Self::ArcoLinux(_))
     }
+
+    pub fn freshness_probe_path(&self) -> Option<&str> {
+        match self {
+            Self::Arch(target) => Some(&target.path_to_test),
+            Self::Arch4edu(target) => Some(&target.path_to_test),
+            Self::ArchCN(target) => Some(&target.path_to_test),
+            Self::Archarm(target) => Some(&target.path_to_test),
+            Self::Artix(target) => Some(&target.path_to_test),
+            Self::BlackArch(target) => Some(&target.path_to_test),
+            Self::CachyOS(target) => Some(&target.path_to_test),
+            Self::Chaotic(target) => Some(&target.path_to_test),
+            Self::EndeavourOS(target) => Some(&target.path_to_test),
+            Self::Manjaro(target) => Some(&target.path_to_test),
+            Self::RebornOS(target) => Some(&target.path_to_test),
+            Self::Stdin(_) | Self::OpenBSD(_) | Self::ArcoLinux(_) => None,
+        }
+    }
 }
 
 fn parse_positive_usize(s: &str) -> Result<usize, String> {
@@ -262,18 +283,19 @@ pub struct Config {
     /// Per-mirror: after min measurement time elapsed, check such number of
     /// subsequently downloaded data chunks whether speed variations are less
     /// than "eps"
-    #[arg(env = "RATE_MIRRORS_EPS_CHECKS", long, default_value = "40")]
+    #[arg(env = "RATE_MIRRORS_EPS_CHECKS", long, default_value = "40", value_parser = parse_positive_usize)]
     pub eps_checks: usize,
 
     /// Number of simultaneous speed tests
-    #[arg(env = "RATE_MIRRORS_CONCURRENCY", long, default_value = "16")]
+    #[arg(env = "RATE_MIRRORS_CONCURRENCY", long, default_value = "16", value_parser = parse_positive_usize)]
     pub concurrency: usize,
 
     /// Number of simultaneous speed tests for mirrors with unknown country
     #[arg(
         env = "RATE_MIRRORS_CONCURRENCY_FOR_UNLABELED",
         long,
-        default_value = "40"
+        default_value = "40",
+        value_parser = parse_positive_usize
     )]
     pub concurrency_for_unlabeled: usize,
 
@@ -562,6 +584,45 @@ mod tests {
     use std::sync::Mutex;
 
     static MIRROR_SOURCE_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn supported_targets_default_to_files_probes() {
+        for target in [
+            "arch",
+            "arch4edu",
+            "archlinuxcn",
+            "archarm",
+            "artix",
+            "blackarch",
+            "cachyos",
+            "chaotic-aur",
+            "endeavouros",
+            "manjaro",
+            "rebornos",
+        ] {
+            let config = Config::try_parse_from(["rate-mirrors", target]).unwrap();
+            let path = config.target.freshness_probe_path().unwrap();
+            assert!(path.ends_with(".files"), "{target}: {path}");
+        }
+    }
+
+    #[test]
+    fn zero_probe_settings_are_rejected() {
+        for setting in [
+            "--eps-checks",
+            "--concurrency",
+            "--concurrency-for-unlabeled",
+        ] {
+            assert!(
+                Config::try_parse_from(["rate-mirrors", setting, "0", "arch"]).is_err(),
+                "{setting}"
+            );
+            assert!(
+                Config::try_parse_from(["rate-mirrors", setting, "1", "arch"]).is_ok(),
+                "{setting}"
+            );
+        }
+    }
 
     fn parse_arch_with_mirror_source_env(
         env_value: Option<&str>,
