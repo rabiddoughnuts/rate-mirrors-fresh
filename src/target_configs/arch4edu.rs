@@ -1,7 +1,7 @@
 use clap::Args;
 
 #[derive(Debug, Clone, Args)]
-pub struct BlackArchTarget {
+pub struct Arch4eduTarget {
     /// Fetch list of mirrors timeout in milliseconds
     #[arg(
         env = "RATE_MIRRORS_FETCH_MIRRORS_TIMEOUT",
@@ -10,14 +10,14 @@ pub struct BlackArchTarget {
     )]
     pub fetch_mirrors_timeout: u64,
 
-    /// Either url or path to BlackArch mirror list file
+    /// Either url or path to Arch4edu mirror list file
     #[arg(
-        env = "RATE_MIRRORS_MIRROR_SOURCE",
+        env = "RATE_MIRRORS_MIRROR_LIST_FILE",
         long,
-        default_value = "https://raw.githubusercontent.com/BlackArch/blackarch/master/mirror/mirror.lst",
+        default_value = "https://raw.githubusercontent.com/arch4edu/mirrorlist/refs/heads/master/mirrorlist.arch4edu",
         verbatim_doc_comment
     )]
-    pub mirror_source: String,
+    pub mirror_list_file: String,
 
     /// Path to be joined to a mirror url and used for speed testing
     ///   the file should be big enough to allow for testing high
@@ -25,7 +25,7 @@ pub struct BlackArchTarget {
     #[arg(
         env = "RATE_MIRRORS_PATH_TO_TEST",
         long,
-        default_value = "blackarch/os/x86_64/blackarch.files",
+        default_value = "x86_64/arch4edu.files",
         verbatim_doc_comment
     )]
     pub path_to_test: String,

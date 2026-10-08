@@ -1,6 +1,8 @@
 use clap::Args;
 use std::str::FromStr;
 
+pub const ARCH_MIRROR_SOURCE_DEFAULT: &str = "https://archlinux.org/mirrors/status/json/";
+
 #[derive(Debug, Clone)]
 pub enum ArchMirrorsSortingStrategy {
     DelayAsc,
@@ -52,15 +54,16 @@ pub struct ArchTarget {
     )]
     pub sort_mirrors_by: ArchMirrorsSortingStrategy,
 
-        /// Base path to repository resources (used for both speed test .files and freshness .db)
-        ///   Example: "extra/os/x86_64/extra"
-        #[arg(
-            env = "RATE_MIRRORS_BASE_PATH",
-            long,
-            default_value = "extra/os/x86_64/extra",
-            verbatim_doc_comment
-        )]
-        pub base_path: String,
+    /// Path to be joined to a mirror url and used for speed testing
+    ///   the file should be big enough to allow for testing high
+    ///   speed connections
+    #[arg(
+        env = "RATE_MIRRORS_PATH_TO_TEST",
+        long,
+        default_value = "extra/os/x86_64/extra.files",
+        verbatim_doc_comment
+    )]
+    pub path_to_test: String,
 
     /// Fetch list of mirrors timeout in milliseconds
     #[arg(
@@ -69,6 +72,16 @@ pub struct ArchTarget {
         default_value = "30000"
     )]
     pub fetch_mirrors_timeout: u64,
+
+    /// Either url or path to Arch Linux mirrors status JSON file
+    #[arg(
+        env = "RATE_MIRRORS_MIRROR_SOURCE",
+        long,
+        default_value = ARCH_MIRROR_SOURCE_DEFAULT,
+        conflicts_with = "fetch_first_tier_only",
+        verbatim_doc_comment
+    )]
+    pub mirror_source: String,
 
     /// comment prefix to use when outputting
     #[arg(env = "RATE_MIRRORS_COMMENT_PREFIX", long, default_value = "# ")]

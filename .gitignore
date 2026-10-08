@@ -4,3 +4,4 @@ __pycache__/
 tags
 .s.vim
 .notes
+.agents/

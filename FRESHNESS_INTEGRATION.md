@@ -12,21 +12,18 @@ Added freshness configuration fields:
 - `freshness_timeout: u64` - Timeout for freshness downloads in milliseconds (default: 15000)
 
 ### 2. Target Configurations
-All pacman-based target configs now use `base_path` instead of `path_to_test`:
-- **Supported targets with freshness**: archlinux, archarm, archlinuxcn, artix, blackarch, cachyos, chaotic, endeavouros, manjaro, rebornos
-- **Unsupported targets** (use `path_to_test`): stdin, openbsd, arcolinux
-
-For supported targets:
-- Speed test file: `{base_path}.files`
-- Freshness DB file: `{base_path}.db`
-
-Example: `extra/os/x86_64/extra` → `extra/os/x86_64/extra.files` and `extra/os/x86_64/extra.db`
+Upstream's target-specific `--path-to-test` options and mirror sources are preserved.
+Freshness is supported for the pacman targets (including Arch4edu); stdin,
+OpenBSD, and ArcoLinux retain speed-only behavior. A common `--base-path` option
+or `RATE_MIRRORS_BASE_PATH` override selects a repository base for both probes:
+`extra/os/x86_64/extra` becomes `extra/os/x86_64/extra.files` and
+`extra/os/x86_64/extra.db`. Without an override, the normal upstream `.files`
+URL is used and its `.db` sibling is inferred.
 
 ### 3. Mirror Structure (`src/mirror.rs`)
-Added `base_path: Option<String>` field to the `Mirror` struct. This field:
-- Contains the base path for supported mirrors (e.g., "extra/os/x86_64/extra")
-- Set to `Some(...)` for pacman-based mirrors
-- Set to `None` for unsupported mirrors (stdin, openbsd, arcolinux)
+The database URL and reference database name are derived from each mirror's
+`.files` probe URL. There is no parallel repository-path field to keep in sync
+across target implementations.
 
 ### 4. Freshness Module (`src/freshness.rs`)
 New module providing:
@@ -120,9 +117,10 @@ rate-mirrors --freshness-timeout=20000 arch  # 20 seconds
 
 4. **Database format support**: Handles zstd-compressed, gzip-compressed, and raw tar archives, matching pacman's database formats. Downloads are limited to 64 MiB, streamed decompression to 256 MiB, and individual descriptions to 1 MiB.
 
-5. **CachyOS variant support**: The `base_path` system preserves CachyOS's multi-architecture support (x86_64, x86_64-v3, x86_64-v4) through its existing wrapper logic.
+5. **CachyOS variant support**: Both upstream `--path-to-test` and the fork's `--base-path` override support x86_64, x86_64-v3, and x86_64-v4 repository paths.
 
-6. **No changes to initial filtering**: Mirror selection and completion/delay filters remain in target fetch implementations (unchanged from original).
+6. **Upstream filtering preserved**: Mirror selection, completion/delay filters,
+country filters, and deduplication use the updated upstream implementations.
 
 ## Testing
 

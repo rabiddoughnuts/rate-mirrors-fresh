@@ -10,16 +10,25 @@ pub struct ChaoticTarget {
     )]
     pub fetch_mirrors_timeout: u64,
 
+    /// Either url or path to Chaotic-AUR mirror list file
+    #[arg(
+        env = "RATE_MIRRORS_MIRROR_LIST_FILE",
+        long,
+        default_value = "https://gitlab.com/chaotic-aur/pkgbuilds/-/raw/main/chaotic-mirrorlist/mirrorlist",
+        verbatim_doc_comment
+    )]
+    pub mirror_list_file: String,
+
     /// Path to be joined to a mirror url and used for speed testing
     ///   the file should be big enough to allow for testing high
     ///   speed connections
-        #[arg(
-            env = "RATE_MIRRORS_BASE_PATH",
-            long,
-            default_value = "chaotic-aur/x86_64/chaotic-aur",
-            verbatim_doc_comment
-        )]
-        pub base_path: String,
+    #[arg(
+        env = "RATE_MIRRORS_PATH_TO_TEST",
+        long,
+        default_value = "chaotic-aur/x86_64/chaotic-aur.files",
+        verbatim_doc_comment
+    )]
+    pub path_to_test: String,
 
     /// Architecture
     #[arg(env = "RATE_MIRRORS_ARCH", long, default_value = "auto")]

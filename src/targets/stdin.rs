@@ -1,8 +1,8 @@
-use crate::config::{AppError, Config, FetchMirrors, LogFormatter};
+use crate::config::{AppError, FetchMirrors, LogFormatter};
 use crate::target_configs::stdin::StdinTarget;
 use std::fmt::Display;
 use std::io::{self, BufRead};
-use std::sync::{mpsc, Arc};
+use std::sync::mpsc;
 
 use crate::mirror::{Mirror, MirrorInfo};
 
@@ -24,16 +24,12 @@ impl LogFormatter for StdinTarget {
 }
 
 impl FetchMirrors for StdinTarget {
-    fn fetch_mirrors(
-        &self,
-        config: Arc<Config>,
-        _tx_progress: mpsc::Sender<String>,
-    ) -> Result<Vec<Mirror>, AppError> {
+    fn fetch_mirrors(&self, _tx_progress: mpsc::Sender<String>) -> Result<Vec<Mirror>, AppError> {
         let mirrors: Vec<_> = io::stdin()
             .lock()
             .lines()
-            .filter_map(
-                |line| match MirrorInfo::parse(&line.unwrap(), &self.separator) {
+            .filter_map(|line| match line {
+                Ok(line) => match MirrorInfo::parse(&line, &self.separator) {
                     Ok(info) => Some(Mirror {
                         country: info.country,
                         url_to_test: info
@@ -41,15 +37,17 @@ impl FetchMirrors for StdinTarget {
                             .join(&self.path_to_test)
                             .expect("failed to join path-to-test"),
                         url: info.url,
-                        base_path: None,
                     }),
                     Err(err) => {
                         eprintln!("{}", err);
                         None
                     }
                 },
-            )
-            .filter(|mirror| config.is_protocol_allowed_for_url(&mirror.url))
+                Err(err) => {
+                    eprintln!("failed to read line: {}", err);
+                    None
+                }
+            })
             .collect();
 
         Ok(mirrors)

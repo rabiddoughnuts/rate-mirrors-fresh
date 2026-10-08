@@ -1,4 +1,5 @@
 use crate::mirror::Mirror;
+use crate::target_configs::arch4edu::Arch4eduTarget;
 use crate::target_configs::archarm::ArcharmTarget;
 use crate::target_configs::archlinux::ArchTarget;
 use crate::target_configs::archlinuxcn::ArchCNTarget;
@@ -16,11 +17,15 @@ use crate::target_configs::stdin::StdinTarget;
 // use crate::target_configs::ubuntu::UbuntuTarget;
 use ambassador::{Delegate, delegatable_trait};
 use clap::{Parser, Subcommand};
-use itertools::Itertools;
+use serde::de::DeserializeOwned;
+use std::collections::HashSet;
 use std::fmt;
+use std::fs;
 use std::str::FromStr;
-use std::sync::{Arc, mpsc};
+use std::sync::mpsc;
+use std::time::Duration;
 use thiserror::Error;
+use tokio::runtime::Runtime;
 use url::Url;
 
 #[derive(Debug, PartialEq, Clone)]
@@ -79,12 +84,20 @@ pub enum AppError {
     RequestTimeout(String),
     #[error("{0}")]
     RequestError(String),
+    #[error("HTTP {status} from {url}")]
+    HttpError { status: u16, url: String },
     #[error("no mirrors after filtering")]
     NoMirrorsAfterFiltering,
     #[error(
         "no mirrors passed the requested freshness check; existing mirrorlists were not replaced"
     )]
     NoFreshMirrorsVerified,
+    #[error("all speed tests failed")]
+    SpeedTestsFailed,
+    #[error("no mirror output produced")]
+    BlankOutput,
+    #[error("stdout closed")]
+    StdoutBrokenPipe,
     #[error(transparent)]
     UrlParseError(#[from] url::ParseError),
     #[error(transparent)]
@@ -115,11 +128,7 @@ pub trait LogFormatter {
 
 #[delegatable_trait]
 pub trait FetchMirrors {
-    fn fetch_mirrors(
-        &self,
-        config: Arc<Config>,
-        tx_progress: mpsc::Sender<String>,
-    ) -> Result<Vec<Mirror>, AppError>;
+    fn fetch_mirrors(&self, tx_progress: mpsc::Sender<String>) -> Result<Vec<Mirror>, AppError>;
 }
 
 #[derive(Debug, Subcommand, Clone, Delegate)]
@@ -131,6 +140,10 @@ pub enum Target {
 
     /// test archlinux mirrors
     Arch(ArchTarget),
+
+    /// test arch4edu mirrors
+    #[command(name = "arch4edu")]
+    Arch4edu(Arch4eduTarget),
 
     /// test archlinuxcn mirrors
     #[command(name = "archlinuxcn")]
@@ -174,6 +187,20 @@ pub enum Target {
     RebornOS(RebornOSTarget),
 }
 
+impl Target {
+    pub fn supports_freshness(&self) -> bool {
+        !matches!(self, Self::Stdin(_) | Self::OpenBSD(_) | Self::ArcoLinux(_))
+    }
+}
+
+fn parse_positive_usize(s: &str) -> Result<usize, String> {
+    let n: usize = s.parse().map_err(|e| format!("{e}"))?;
+    if n == 0 {
+        return Err("value must be at least 1".into());
+    }
+    Ok(n)
+}
+
 #[derive(Debug, Parser)]
 #[command(
     name = "rate-mirrors config",
@@ -191,8 +218,7 @@ pub struct Config {
     #[arg(env = "RATE_MIRRORS_PROTOCOL", long = "protocol", name = "protocol")]
     pub protocols: Vec<Protocol>,
 
-    /// Per-mirror speed test timeout in milliseconds. It is doubled in cases where slow connection
-    /// times are detected
+    /// Per-mirror speed test timeout in milliseconds
     #[arg(env = "RATE_MIRRORS_PER_MIRROR_TIMEOUT", long, default_value = "8000")]
     pub per_mirror_timeout: u64,
 
@@ -214,14 +240,17 @@ pub struct Config {
         default_value = "70000"
     )]
     pub min_bytes_per_mirror: usize,
-
-    /// Per-mirror: sigma to mean speed ratio
+    /// Relative speed-jitter threshold used for early stopping.
     ///
-    ///   1.0 -- 68% probability (1 sigma), no 100% error
-    ///   0.5 -- 68% probability (1 sigma), no 50% error;
-    ///   0.25 -- 68% probability (1 sigma), no 25% error;
-    ///   0.125 -- 95% probability (2 sigmas), no 25% error;
-    ///   0.0625 -- 95% probability (2 sigmas), no 12.5% error:
+    /// After the minimum measurement requirements are met, stop when the
+    /// standard deviation of the last `--eps-checks` chunk speeds divided
+    /// by their mean is at most this value. Smaller values require steadier
+    /// recent throughput and may make tests run longer.
+    ///
+    /// For example, 0.0625 requires the standard deviation to be at most
+    /// 6.25% of the mean.
+    ///
+    /// This is a stability heuristic, not a confidence or error bound.
     #[arg(
         env = "RATE_MIRRORS_EPS",
         long,
@@ -232,7 +261,7 @@ pub struct Config {
 
     /// Per-mirror: after min measurement time elapsed, check such number of
     /// subsequently downloaded data chunks whether speed variations are less
-    /// then "eps"
+    /// than "eps"
     #[arg(env = "RATE_MIRRORS_EPS_CHECKS", long, default_value = "40")]
     pub eps_checks: usize,
 
@@ -249,7 +278,7 @@ pub struct Config {
     pub concurrency_for_unlabeled: usize,
 
     /// Max number of jumps between countries, when finding top mirrors
-    #[arg(env = "RATE_MIRRORS_MAX_JUMPS", long, default_value = "12")]
+    #[arg(env = "RATE_MIRRORS_MAX_JUMPS", long, default_value = "7")]
     pub max_jumps: usize,
 
     /// Entry country - first country (+ its neighbours) to test.
@@ -262,11 +291,34 @@ pub struct Config {
     )]
     pub entry_country: String,
 
+    /// Exclude countries from mirror selection (comma-separated 2-letter ISO country codes).
+    /// Use ZZ to filter out mirrors with undefined country.
+    /// Mutually exclusive with --include-countries.
+    #[arg(
+        env = "RATE_MIRRORS_EXCLUDE_COUNTRIES",
+        long,
+        value_name = "country-codes",
+        verbatim_doc_comment
+    )]
+    pub exclude_countries: Option<String>,
+
+    /// Include countries in mirror selection (comma-separated 2-letter ISO country codes).
+    /// Use ZZ to include mirrors with undefined country.
+    /// Mutually exclusive with --exclude-countries.
+    #[arg(
+        conflicts_with = "exclude_countries",
+        env = "RATE_MIRRORS_INCLUDE_COUNTRIES",
+        long,
+        value_name = "country-codes",
+        verbatim_doc_comment
+    )]
+    pub include_countries: Option<String>,
+
     /// Neighbor country to test per country
     #[arg(
         env = "RATE_MIRRORS_COUNTRY_NEIGHBORS_PER_COUNTRY",
         long,
-        default_value = "9"
+        default_value = "3"
     )]
     pub country_neighbors_per_country: usize,
 
@@ -274,7 +326,7 @@ pub struct Config {
     #[arg(
         env = "RATE_MIRRORS_COUNTRY_TEST_MIRRORS_PER_COUNTRY",
         long,
-        default_value = "21"
+        default_value = "2"
     )]
     pub country_test_mirrors_per_country: usize,
 
@@ -282,12 +334,12 @@ pub struct Config {
     #[arg(
         env = "RATE_MIRRORS_TOP_MIRRORS_NUMBER_TO_RETEST",
         long,
-        default_value = "42"
+        default_value = "5"
     )]
     pub top_mirrors_number_to_retest: usize,
 
     /// Max number of mirrors to output
-    #[arg(env = "RATE_MIRRORS_MAX_MIRRORS_TO_OUTPUT", long)]
+    #[arg(env = "RATE_MIRRORS_MAX_MIRRORS_TO_OUTPUT", long, value_parser = parse_positive_usize)]
     pub max_mirrors_to_output: Option<usize>,
 
     /// Filename to save the output to in case of success
@@ -328,6 +380,22 @@ pub struct Config {
     /// Timeout for freshness check downloads in milliseconds
     #[arg(env = "RATE_MIRRORS_FRESHNESS_TIMEOUT", long, default_value = "15000")]
     pub freshness_timeout: u64,
+
+    /// Override the repository base path for both .files speed probes and .db freshness checks.
+    #[arg(env = "RATE_MIRRORS_BASE_PATH", long, global = true)]
+    pub base_path: Option<String>,
+
+    /// Exit with error instead of outputting untested mirrors when all speed tests fail
+    #[arg(env = "RATE_MIRRORS_DISABLE_UNTESTED_FALLBACK", long)]
+    pub disable_untested_fallback: bool,
+
+    /// Pre-parsed set of excluded country codes (lowercase)
+    #[arg(skip)]
+    pub excluded_countries_set: HashSet<String>,
+
+    /// Pre-parsed set of included country codes (lowercase)
+    #[arg(skip)]
+    pub included_countries_set: HashSet<String>,
 }
 
 fn parse_speed_weight(value: &str) -> Result<f64, String> {
@@ -342,39 +410,366 @@ fn parse_speed_weight(value: &str) -> Result<f64, String> {
 }
 
 impl Config {
-    pub fn is_protocol_allowed(&self, protocol: &Protocol) -> bool {
-        self.protocols.is_empty() || self.protocols.contains(protocol)
+    pub fn new() -> Self {
+        Self::parse().populate_country_sets()
+    }
+
+    fn populate_country_sets(mut self) -> Self {
+        fn parse_ccs(s: &Option<String>) -> HashSet<String> {
+            s.as_ref()
+                .map(|s| {
+                    s.split(',')
+                        .map(|c| c.trim().to_ascii_lowercase())
+                        .filter(|c| !c.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default()
+        }
+
+        self.excluded_countries_set = parse_ccs(&self.exclude_countries);
+        self.included_countries_set = parse_ccs(&self.include_countries);
+        self
+    }
+
+    pub fn is_country_excluded(&self, code: &str) -> bool {
+        let code = code.to_ascii_lowercase();
+        self.excluded_countries_set.contains(&code)
+            || (self.include_countries.is_some() && !self.included_countries_set.contains(&code))
     }
 
     pub fn is_protocol_allowed_for_url(&self, url: &Url) -> bool {
-        self.protocols.is_empty()
-            || url
-                .scheme()
+        if self.protocols.is_empty() {
+            matches!(url.scheme(), "http" | "https")
+        } else {
+            url.scheme()
                 .parse()
                 .map(|p| self.protocols.contains(&p))
                 .unwrap_or(false)
+        }
     }
+}
 
-    pub fn get_preferred_url<'a>(&self, urls: &'a [Url]) -> Option<&'a Url> {
-        urls.iter()
-            .filter(|u| self.is_protocol_allowed_for_url(u))
-            .sorted_by_key(|u| match u.scheme() {
-                "https" => 0,
-                "http" => 1,
-                _ => 2,
-            })
-            .next()
+pub fn default_client_builder() -> Result<reqwest::Client, AppError> {
+    reqwest::Client::builder()
+        .user_agent(format!(
+            "{}/{}",
+            env!("CARGO_PKG_NAME").replace('_', "-"),
+            env!("CARGO_PKG_VERSION")
+        ))
+        .build()
+        .map_err(|e| AppError::RequestError(format!("failed to build HTTP client: {}", e)))
+}
+
+fn convert_reqwest_error(e: reqwest::Error, url: &str) -> AppError {
+    if e.is_timeout() {
+        AppError::RequestTimeout(url.to_string())
+    } else {
+        AppError::RequestError(format!("failed to connect to {}: {}", url, e))
+    }
+}
+
+pub fn fetch_json<T: DeserializeOwned>(url: &str, timeout_ms: u64) -> Result<T, AppError> {
+    let runtime = Runtime::new().unwrap();
+    let result = runtime.block_on(async {
+        let client = default_client_builder()?;
+        let response = client
+            .get(url)
+            .timeout(Duration::from_millis(timeout_ms))
+            .send()
+            .await
+            .map_err(|e| convert_reqwest_error(e, url))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            return Err(AppError::HttpError {
+                status: status.as_u16(),
+                url: url.to_string(),
+            });
+        }
+
+        response.json::<T>().await.map_err(|e| {
+            AppError::RequestError(format!("failed to decode JSON from {}: {}", url, e))
+        })
+    });
+    runtime.shutdown_timeout(Duration::from_secs(1));
+    result
+}
+
+pub fn fetch_text(url: &str, timeout_ms: u64) -> Result<String, AppError> {
+    let runtime = Runtime::new().unwrap();
+    let result = runtime.block_on(async {
+        let client = default_client_builder()?;
+        let response = client
+            .get(url)
+            .timeout(Duration::from_millis(timeout_ms))
+            .send()
+            .await
+            .map_err(|e| convert_reqwest_error(e, url))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            return Err(AppError::HttpError {
+                status: status.as_u16(),
+                url: url.to_string(),
+            });
+        }
+
+        response.text_with_charset("utf-8").await.map_err(|e| {
+            AppError::RequestError(format!("failed to read response from {}: {}", url, e))
+        })
+    });
+    runtime.shutdown_timeout(Duration::from_secs(1));
+    result
+}
+
+/// Fetches text content from either a remote URL or a local file path.
+/// URLs are detected via `Url::parse`; everything else is treated as a filesystem path.
+/// Used by mirror-list and mirror-source options that can point at a URL or a file.
+pub fn fetch_text_or_file(path_or_url: &str, timeout_ms: u64) -> Result<String, AppError> {
+    if Url::parse(path_or_url).is_ok() {
+        fetch_text(path_or_url, timeout_ms)
+    } else {
+        fs::read_to_string(path_or_url)
+            .map_err(|e| AppError::RequestError(format!("failed to read mirror source: {}", e)))
+    }
+}
+
+/// Same as `fetch_text_or_file` but deserializes the result as JSON.
+/// Supports both remote status endpoints and local JSON files for the mirror list source.
+pub fn fetch_json_or_file<T: DeserializeOwned>(
+    path_or_url: &str,
+    timeout_ms: u64,
+) -> Result<T, AppError> {
+    if Url::parse(path_or_url).is_ok() {
+        fetch_json(path_or_url, timeout_ms)
+    } else {
+        let content = fs::read_to_string(path_or_url)
+            .map_err(|e| AppError::RequestError(format!("failed to read mirror source: {}", e)))?;
+        serde_json::from_str(&content).map_err(|e| {
+            AppError::RequestError(format!(
+                "failed to decode JSON from mirror source {}: {}",
+                path_or_url, e
+            ))
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::targets::archlinux::{ARCH_TIER_1_MIRROR_SOURCE, selected_mirror_source};
+    use clap::error::ErrorKind;
+    use std::sync::Mutex;
+
+    static MIRROR_SOURCE_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn parse_arch_with_mirror_source_env(
+        env_value: Option<&str>,
+        args: &[&str],
+    ) -> Result<Config, clap::Error> {
+        let _guard = MIRROR_SOURCE_ENV_LOCK.lock().unwrap();
+        let old_value = std::env::var_os("RATE_MIRRORS_MIRROR_SOURCE");
+
+        unsafe {
+            match env_value {
+                Some(value) => std::env::set_var("RATE_MIRRORS_MIRROR_SOURCE", value),
+                None => std::env::remove_var("RATE_MIRRORS_MIRROR_SOURCE"),
+            }
+        }
+
+        let result = Config::try_parse_from(args);
+
+        unsafe {
+            match old_value {
+                Some(value) => std::env::set_var("RATE_MIRRORS_MIRROR_SOURCE", value),
+                None => std::env::remove_var("RATE_MIRRORS_MIRROR_SOURCE"),
+            }
+        }
+
+        result
+    }
+
+    fn arch_target(config: &Config) -> &ArchTarget {
+        match &config.target {
+            Target::Arch(target) => target,
+            other => panic!("expected Arch target, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn arch_fetch_first_tier_only_succeeds_and_selects_tier_1_source() {
+        let config = parse_arch_with_mirror_source_env(
+            None,
+            &["rate-mirrors", "arch", "--fetch-first-tier-only"],
+        )
+        .unwrap();
+
+        assert_eq!(
+            selected_mirror_source(arch_target(&config)),
+            ARCH_TIER_1_MIRROR_SOURCE
+        );
+    }
+
+    #[test]
+    fn arch_mirror_source_argument_succeeds() {
+        let config = parse_arch_with_mirror_source_env(
+            None,
+            &[
+                "rate-mirrors",
+                "arch",
+                "--mirror-source",
+                "local-status.json",
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(arch_target(&config).mirror_source, "local-status.json");
+    }
+
+    #[test]
+    fn arch_mirror_source_argument_conflicts_with_fetch_first_tier_only() {
+        let err = parse_arch_with_mirror_source_env(
+            None,
+            &[
+                "rate-mirrors",
+                "arch",
+                "--mirror-source",
+                "local-status.json",
+                "--fetch-first-tier-only",
+            ],
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn arch_mirror_source_env_conflicts_with_fetch_first_tier_only() {
+        let err = parse_arch_with_mirror_source_env(
+            Some("local-status.json"),
+            &["rate-mirrors", "arch", "--fetch-first-tier-only"],
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
+    }
+
+    fn parse_arch_with_country_filter_env(args: &[&str]) -> Result<Config, clap::Error> {
+        let _guard = MIRROR_SOURCE_ENV_LOCK.lock().unwrap();
+        let old_exclude = std::env::var_os("RATE_MIRRORS_EXCLUDE_COUNTRIES");
+        let old_include = std::env::var_os("RATE_MIRRORS_INCLUDE_COUNTRIES");
+
+        unsafe {
+            std::env::remove_var("RATE_MIRRORS_EXCLUDE_COUNTRIES");
+            std::env::remove_var("RATE_MIRRORS_INCLUDE_COUNTRIES");
+        }
+
+        let result = Config::try_parse_from(args);
+
+        unsafe {
+            match old_exclude {
+                Some(value) => std::env::set_var("RATE_MIRRORS_EXCLUDE_COUNTRIES", value),
+                None => std::env::remove_var("RATE_MIRRORS_EXCLUDE_COUNTRIES"),
+            }
+            match old_include {
+                Some(value) => std::env::set_var("RATE_MIRRORS_INCLUDE_COUNTRIES", value),
+                None => std::env::remove_var("RATE_MIRRORS_INCLUDE_COUNTRIES"),
+            }
+        }
+
+        result
+    }
+
+    #[test]
+    fn country_filter_modes() {
+        let parse = |args: &[&str]| {
+            parse_arch_with_country_filter_env(args)
+                .unwrap()
+                .populate_country_sets()
+        };
+
+        struct Case {
+            args: &'static [&'static str],
+            expected: &'static [(&'static str, bool)],
+        }
+        let cases = [
+            Case {
+                args: &["rate-mirrors", "arch"],
+                expected: &[("us", false), ("zz", false)],
+            },
+            Case {
+                args: &["rate-mirrors", "--exclude-countries", "US, de,", "arch"],
+                expected: &[
+                    ("US", true),
+                    ("us", true),
+                    ("DE", true),
+                    ("fr", false),
+                    ("zz", false),
+                ],
+            },
+            Case {
+                args: &["rate-mirrors", "--exclude-countries", "US,ZZ", "arch"],
+                expected: &[("zz", true)],
+            },
+            Case {
+                args: &["rate-mirrors", "--include-countries", "us,ZZ", "arch"],
+                expected: &[("us", false), ("zz", false), ("de", true)],
+            },
+            Case {
+                args: &["rate-mirrors", "--include-countries", "us", "arch"],
+                expected: &[("zz", true)],
+            },
+        ];
+
+        for case in cases {
+            let config = parse(case.args);
+            for (code, excluded) in case.expected {
+                assert_eq!(
+                    config.is_country_excluded(code),
+                    *excluded,
+                    "args={:?} code={code}",
+                    case.args
+                );
+            }
+        }
+
+        let err = parse_arch_with_country_filter_env(&[
+            "rate-mirrors",
+            "--exclude-countries",
+            "US",
+            "--include-countries",
+            "DE",
+            "arch",
+        ])
+        .unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
+    }
+}
+
+#[cfg(test)]
+mod freshness_tests {
+    use super::*;
 
     #[test]
     fn freshness_is_opt_in_and_weight_has_defined_endpoints() {
         let default = Config::try_parse_from(["rate-mirrors", "arch"]).unwrap();
         assert_eq!(default.freshness_check, FreshnessMode::Off);
+        assert_eq!(default.max_jumps, 7);
+        assert_eq!(default.country_test_mirrors_per_country, 2);
+        assert_eq!(default.country_neighbors_per_country, 3);
+        assert_eq!(default.top_mirrors_number_to_retest, 5);
+
+        let override_path = Config::try_parse_from([
+            "rate-mirrors",
+            "arch",
+            "--base-path",
+            "extra/os/x86_64/extra",
+        ])
+        .unwrap();
+        assert_eq!(
+            override_path.base_path.as_deref(),
+            Some("extra/os/x86_64/extra")
+        );
 
         let bare = Config::try_parse_from(["rate-mirrors", "--freshness-check", "arch"]).unwrap();
         assert_eq!(bare.freshness_check, FreshnessMode::On(1.0));

@@ -1,12 +1,9 @@
-use crate::config::{AppError, Config, FetchMirrors, LogFormatter};
+use crate::config::{AppError, FetchMirrors, LogFormatter, fetch_text_or_file};
 use crate::countries::Country;
 use crate::mirror::Mirror;
 use crate::target_configs::blackarch::BlackArchTarget;
-use reqwest;
 use std::fmt::Display;
-use std::sync::{mpsc, Arc};
-use std::time::Duration;
-use tokio::runtime::Runtime;
+use std::sync::mpsc;
 use url::Url;
 
 impl LogFormatter for BlackArchTarget {
@@ -26,28 +23,12 @@ impl LogFormatter for BlackArchTarget {
 }
 
 impl FetchMirrors for BlackArchTarget {
-    fn fetch_mirrors(
-        &self,
-        config: Arc<Config>,
-        _tx_progress: mpsc::Sender<String>,
-    ) -> Result<Vec<Mirror>, AppError> {
-        let url = "https://raw.githubusercontent.com/BlackArch/blackarch/master/mirror/mirror.lst";
-
+    fn fetch_mirrors(&self, _tx_progress: mpsc::Sender<String>) -> Result<Vec<Mirror>, AppError> {
         // RU|http://mirror.surf/blackarch/$repo/os/$arch|mirror.surf
         //
         // http://mirror.surf/blackarch/blackarch/os/x86_64/blackarch.files
 
-        let output = Runtime::new().unwrap().block_on(async {
-            Ok::<_, AppError>(
-                reqwest::Client::new()
-                    .get(url)
-                    .timeout(Duration::from_millis(self.fetch_mirrors_timeout))
-                    .send()
-                    .await?
-                    .text_with_charset("utf-8")
-                    .await?,
-            )
-        })?;
+        let output = fetch_text_or_file(&self.mirror_source, self.fetch_mirrors_timeout)?;
 
         let mirrors: Vec<Mirror> = output
             .lines()
@@ -65,16 +46,14 @@ impl FetchMirrors for BlackArchTarget {
                     None => None,
                 }
             })
-            .filter(|(url, _)| config.is_protocol_allowed_for_url(url))
             .map(|(url, country)| {
                 let url_to_test = url
-                    .join(&format!("{}.files", self.base_path))
+                    .join(&self.path_to_test)
                     .expect("failed to join path_to_test");
                 Mirror {
                     country,
                     url,
                     url_to_test,
-                    base_path: Some(self.base_path.clone()),
                 }
             })
             .collect();

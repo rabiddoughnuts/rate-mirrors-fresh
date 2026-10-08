@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Produce a shareable report on rate-mirrors search depth.
 
-One option changes at a time around the stock v0.31 defaults. The benchmark
+One option changes at a time around the stock v0.33 defaults. The benchmark
 never passes --save and removes RATE_MIRRORS_* environment overrides.
 """
 
@@ -21,7 +21,7 @@ from pathlib import Path
 
 
 # (stock default, one below / default / two above, phase). These defaults were
-# checked against the stock rate-mirrors v0.31.0 executable, not this fork.
+# checked against the stock rate-mirrors v0.33.0 defaults, not this fork.
 AXES = {
     "max-jumps": (7, (4, 7, 10, 14), "exploration"),
     "country-test-mirrors-per-country": (2, (1, 2, 4, 8), "exploration"),
@@ -210,8 +210,10 @@ def median(values):
 
 def valid(row):
     return (row["exit_code"] == 0 and not row["timed_out"]
-            and row["retest_probes"] == 0 and bool(row["selected_order"])
-            and bool(row["freshness_ranked_mirrors"]))
+            and row["retest_probes"] == 0
+            and not row.get("instrumentation_missing", False)
+            and bool(row["selected_order"])
+            and len(row["freshness_ranked_mirrors"]) == len(row["selected_order"]))
 
 
 def summarize(rows):
@@ -280,12 +282,12 @@ def markdown_report(report):
              "Location is inferred from the public network exit and may reflect a VPN or proxy.",
              "The report does not store the public IP. No pacman mirrorlist was saved.", "",
              "## Setting comparison", "",
-             "The exploration baseline uses stock v0.31 defaults (7 jumps, 2 mirrors/country,",
+             "The exploration baseline uses stock v0.33 defaults (7 jumps, 2 mirrors/country,",
              "3 neighbors/country). Each axis tests one lower value, the stock default, and",
              "two higher values. Freshness is enabled for every run. The normal retest",
              f"default is {STOCK_RETEST_DEFAULT}, but this benchmark forces retests to 0",
              "to isolate the initial exploration pass.", "",
-             "| Mode | Axis | Value | Valid/total | Checked | New | New mirror median MB/s | Final | Fastest top median MB/s | Δ fastest MB/s | Freshest top quality | Time s | Δ time s |",
+             "| Mode | Axis | Value | Valid/total | Checked | New | New mirror median .files MB/s | Final | Fastest top median combined MB/s | Δ fastest MB/s | Freshest top quality | Time s | Δ time s |",
              "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"]
     for item in summary:
         lines.append("| " + " | ".join((item["mode"], item["axis"], str(item["value"]),
@@ -304,7 +306,7 @@ def markdown_report(report):
               "package-build-date proxy, not a mirror's actual last-sync time. Each run",
               "constructs its own package frontier, so quality values across runs are not",
               "directly comparable; use the per-run rankings and mirror overlap instead.",
-              "Every speed shown here comes from the initial combined .files + .db probe.", ""]
+              "New-mirror speed is the first .files probe; final speed includes .files + .db.", ""]
     for row in rows:
         lines += [f"## {row['mode']} / {row['axis']}={row['value']} / repeat {row['repeat']}", "",
                   f"UTC: {row['started_utc']} to {row['ended_utc']}; elapsed {fmt(row['elapsed_seconds'])} s; "

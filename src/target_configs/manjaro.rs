@@ -40,6 +40,15 @@ pub struct ManjaroTarget {
     )]
     pub fetch_mirrors_timeout: u64,
 
+    /// Either url or path to Manjaro mirrors status JSON file
+    #[arg(
+        env = "RATE_MIRRORS_MIRROR_SOURCE",
+        long,
+        default_value = "https://repo.manjaro.org/status.json",
+        verbatim_doc_comment
+    )]
+    pub mirror_source: String,
+
     /// Max acceptable delay in seconds since the last time a mirror has been
     /// synced
     #[arg(env = "RATE_MIRRORS_MAX_DELAY", long, default_value = "86400")]
@@ -48,13 +57,13 @@ pub struct ManjaroTarget {
     /// Path to be joined to a mirror url and used for speed testing
     ///   the file should be big enough to allow for testing high
     ///   speed connections
-        #[arg(
-            env = "RATE_MIRRORS_BASE_PATH",
-            long,
-            default_value = "extra/x86_64/extra",
-            verbatim_doc_comment
-        )]
-        pub base_path: String,
+    #[arg(
+        env = "RATE_MIRRORS_PATH_TO_TEST",
+        long,
+        default_value = "extra/x86_64/extra.files",
+        verbatim_doc_comment
+    )]
+    pub path_to_test: String,
 
     /// comment prefix to use when outputting
     #[arg(env = "RATE_MIRRORS_COMMENT_PREFIX", long, default_value = "# ")]

@@ -1,13 +1,12 @@
-use crate::config::{AppError, Config, FetchMirrors, LogFormatter};
-use crate::countries::Country;
+use crate::config::{AppError, FetchMirrors, LogFormatter};
 use crate::mirror::Mirror;
 use crate::target_configs::artix::ArtixTarget;
-use reqwest;
+use crate::targets::archlinux::fetch_archweb_mirrors;
 use std::fmt::Display;
-use std::sync::{Arc, mpsc};
-use std::time::Duration;
-use tokio::runtime::Runtime;
-use url::Url;
+use std::sync::mpsc;
+
+pub(crate) const ARTIX_TIER_1_MIRROR_SOURCE: &str =
+    "https://status.artixlinux.org/mirrors/status/tier/1/json/";
 
 impl LogFormatter for ArtixTarget {
     fn format_comment(&self, message: impl Display) -> String {
@@ -19,70 +18,24 @@ impl LogFormatter for ArtixTarget {
     }
 }
 
+pub(crate) fn selected_mirror_source(target: &ArtixTarget) -> &str {
+    if target.fetch_first_tier_only {
+        ARTIX_TIER_1_MIRROR_SOURCE
+    } else {
+        &target.mirror_source
+    }
+}
+
 impl FetchMirrors for ArtixTarget {
-    fn fetch_mirrors(
-        &self,
-        config: Arc<Config>,
-        _tx_progress: mpsc::Sender<String>,
-    ) -> Result<Vec<Mirror>, AppError> {
-        let url = "https://packages.artixlinux.org/mirrorlist/all/";
-
-        let output = Runtime::new().unwrap().block_on(async {
-            Ok::<_, AppError>(
-                reqwest::Client::new()
-                    .get(url)
-                    .timeout(Duration::from_millis(self.fetch_mirrors_timeout))
-                    .send()
-                    .await?
-                    .text_with_charset("utf-8")
-                    .await?,
-            )
-        })?;
-
-        let mut current_country = None;
-        let mut mirrors = Vec::new();
-
-        for line in output.lines() {
-            let trimmed = line.trim_start();
-
-            if trimmed.starts_with("##") {
-                let country_name = trimmed
-                    .trim_start_matches('#')
-                    .trim_start_matches('#')
-                    .trim_start();
-                current_country = Country::from_str(country_name);
-                continue;
-            }
-
-            let uncommented = trimmed.trim_start_matches('#').trim_start();
-            if !uncommented.starts_with("Server = ") {
-                continue;
-            }
-
-            let cleaned = uncommented
-                .trim_start_matches("Server = ")
-                .replace("$repo/os/$arch", "");
-
-            if cleaned.is_empty() {
-                continue;
-            }
-
-            if let Ok(url) = Url::parse(&cleaned) {
-                if let Ok(protocol) = url.scheme().parse() {
-                    if config.is_protocol_allowed(&protocol) {
-                        mirrors.push(Mirror {
-                            country: current_country,
-                            url_to_test: url
-                                    .join(&format!("{}.files", self.base_path))
-                                .expect("failed to join path_to_test"),
-                            url,
-                            base_path: Some(self.base_path.clone()),
-                        });
-                    }
-                }
-            }
-        }
-
-        Ok(mirrors)
+    fn fetch_mirrors(&self, tx_progress: mpsc::Sender<String>) -> Result<Vec<Mirror>, AppError> {
+        fetch_archweb_mirrors(
+            selected_mirror_source(self),
+            self.fetch_mirrors_timeout,
+            self.completion,
+            self.max_delay,
+            &self.sort_mirrors_by,
+            &self.path_to_test,
+            tx_progress,
+        )
     }
 }

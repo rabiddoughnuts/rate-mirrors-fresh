@@ -1,3 +1,98 @@
+# 0.33.0 (2026-09-19)
+
+- added `--include-countries` / `RATE_MIRRORS_INCLUDE_COUNTRIES` to select only
+  mirrors from listed countries (comma-separated 2-letter ISO codes,
+  case-insensitive); use `ZZ` to include mirrors with undefined country;
+  mutually exclusive with `--exclude-countries`
+  [#112 by stepnem](https://github.com/westandskif/rate-mirrors/pull/112)
+
+# 0.32.0 (2026-09-13)
+
+- **! BREAKING CHANGE !** switched Artix mirror source to the archweb status JSON
+  (`https://status.artixlinux.org/mirrors/status/json/`), which reports per-mirror
+  sync completion, delay and score; the artix option `--mirror-list-file` /
+  `RATE_MIRRORS_MIRROR_LIST_FILE` is replaced by `--mirror-source` /
+  `RATE_MIRRORS_MIRROR_SOURCE` and expects that JSON (url or file), not a pacman
+  mirrorlist; to rank a mirrorlist of your own, feed its mirror base urls (one per
+  line, no `$repo/os/$arch`) to `rate-mirrors stdin` instead
+  [#110 by CorySanin](https://github.com/westandskif/rate-mirrors/pull/110)
+- added Artix options `--completion`, `--max-delay`, `--sort-mirrors-by`,
+  `--fetch-first-tier-only` with the same semantics, defaults and env names as for
+  arch; by default artix now skips mirrors that are not fully synced or older than
+  a day, so fewer mirrors are tested than from the old mirrorlist (37 of the
+  previous 53 at review time); pass `--completion 0.95` to relax
+- the shared env vars `RATE_MIRRORS_COMPLETION`, `RATE_MIRRORS_MAX_DELAY`,
+  `RATE_MIRRORS_SORT_MIRRORS_BY`, `RATE_MIRRORS_MIRROR_SOURCE` and
+  `RATE_MIRRORS_FETCH_FIRST_TIER_ONLY` now apply to artix as well
+
+# 0.31.0 (2026-07-29)
+
+- switched CachyOS default mirror source to the dashboard JSON API (country
+  codes and sync-delay metadata), with plain pacman mirrorlist fallback
+  [#108 by vnepogodin](https://github.com/westandskif/rate-mirrors/pull/108)
+- added CachyOS option `--max-delay` / `RATE_MIRRORS_MAX_DELAY` to skip stale
+  mirrors (JSON API only)
+
+# 0.30.0 (2026-07-26)
+
+- switched TLS backend from vendored OpenSSL to rustls (ring crypto provider):
+  no OpenSSL/LibreSSL is needed at build or run time anymore, which fixes
+  building against newer LibreSSL (>= 4.1) and speeds up builds; verified
+  against all 486 active Arch https mirrors with zero TLS regressions
+- note for packagers: the `openssl` dependency can be dropped
+- fixed CachyOS country parsing: read `code=XX` from upstream mirrorlist
+  comments so country hopping and `--exclude-countries` work again
+
+# 0.29.0 (2026-05-17)
+
+- added URL-or-file mirror source options for mirror list fetching
+- added option `--mirror-source` / `RATE_MIRRORS_MIRROR_SOURCE` for URL-or-file custom mirror source
+- added option `--mirror-list-file` / `RATE_MIRRORS_MIRROR_LIST_FILE` for URL-or-file Server-line mirror file
+- fixed panic when stdout is closed, for example when piping output to `head` (kudos to `Anexen`)
+
+# 0.28.3 (2026-04-16)
+
+- fixed chaotic-aur mirrorlist parsing [#101 by binarynoise](https://github.com/westandskif/rate-mirrors/pull/101)
+- added user agent [#102](https://github.com/westandskif/rate-mirrors/issues/102)
+
+# 0.28.2 (2026-03-14)
+
+- fixed hang after re-testing top mirrors caused by tokio Runtime drop [#99 by ptr1337](https://github.com/westandskif/rate-mirrors/pull/99)
+
+# 0.28.1 (2026-02-25)
+
+- updated Chaotic-AUR mirrorlist URL to use the main GitLab repo [#97 by viktor4096](https://github.com/westandskif/rate-mirrors/pull/97)
+
+# 0.28.0 (2026-02-15)
+
+- added `ZZ` pseudo-code to `--exclude-countries` to filter out mirrors with undefined country
+
+# 0.27.0 (2026-02-08)
+
+- added Arch4edu support (`arch4edu`)
+
+# 0.26.0 (2026-02-08)
+
+- added `--disable-untested-fallback` to exit with error when all speed tests fail
+- centralized protocol and country filtering before speed tests
+- added mirror deduplication by host, port, and path with `https` preference
+- added positive-value validation for `--max-mirrors-to-output`
+- added startup version comment and explicit blank-output error handling
+
+# 0.25.0 (2026-01-16)
+
+- improved error messages when fetching mirrors fails:
+  - HTTP errors (429, 500, etc.) now show status code and URL instead of "error decoding response body"
+  - timeout errors now include the URL instead of showing empty string
+  - JSON/text decoding errors now include the URL for context
+
+# 0.24.0 (2026-01-16)
+
+- added base option `--exclude-countries` to skip mirrors from certain
+  countries (comma separated 2-letter ISO country codes)
+- fixed manjaro mirror delay calculation (hours were incorrectly treated as minutes)
+- fixed manjaro URL handling in mirror parsing
+
 # 0.23.0 (2025-12-16)
 
 - update artix mirrorlist, handling comments, preserving country labels [#83 by Sachin-Bhat](https://github.com/westandskif/rate-mirrors/pull/83/files)

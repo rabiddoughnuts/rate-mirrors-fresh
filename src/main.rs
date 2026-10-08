@@ -12,7 +12,6 @@ mod targets;
 use crate::config::{AppError, Config, FetchMirrors, Target};
 use crate::speed_test::{SpeedTestResult, SpeedTestResults, test_speed_by_countries};
 use chrono::prelude::*;
-use clap::Parser;
 use config::LogFormatter;
 use itertools::Itertools;
 use mirror::Mirror;
@@ -33,6 +32,7 @@ struct OutputSink<'a, T: LogFormatter> {
     comments_enabled: bool,
     comments_in_file_enabled: bool,
     pacman_mirrorlist: bool,
+    mirror_count: usize,
 }
 
 impl<'a, T: LogFormatter> OutputSink<'a, T> {
@@ -51,6 +51,7 @@ impl<'a, T: LogFormatter> OutputSink<'a, T> {
                 comments_enabled,
                 comments_in_file_enabled,
                 pacman_mirrorlist,
+                mirror_count: 0,
             },
             None => Self {
                 formatter,
@@ -59,12 +60,24 @@ impl<'a, T: LogFormatter> OutputSink<'a, T> {
                 comments_enabled,
                 comments_in_file_enabled,
                 pacman_mirrorlist,
+                mirror_count: 0,
             },
         };
         Ok(output)
     }
 
-    pub fn display_comment(&mut self, line: impl Display) {
+    fn write_stdout_line(&mut self, line: &str) -> Result<(), AppError> {
+        let mut stdout = io::stdout().lock();
+        writeln!(stdout, "{}", line).map_err(|err| {
+            if err.kind() == io::ErrorKind::BrokenPipe {
+                AppError::StdoutBrokenPipe
+            } else {
+                AppError::IoError(err)
+            }
+        })
+    }
+
+    pub fn display_comment(&mut self, line: impl Display) -> Result<(), AppError> {
         if self.comments_enabled {
             // Parser and network errors may contain newlines. Every physical
             // line must remain a comment in a saved pacman mirrorlist.
@@ -72,7 +85,7 @@ impl<'a, T: LogFormatter> OutputSink<'a, T> {
                 let s = self
                     .formatter
                     .format_comment(physical_line.trim_end_matches('\r'));
-                println!("{}", &s);
+                self.write_stdout_line(&s)?;
                 if self.comments_in_file_enabled {
                     if let Some(output_lines) = &mut self.output_lines {
                         output_lines.push(s);
@@ -80,14 +93,17 @@ impl<'a, T: LogFormatter> OutputSink<'a, T> {
                 }
             }
         }
+        Ok(())
     }
 
-    pub fn display_mirror(&mut self, mirror: &Mirror) {
+    pub fn display_mirror(&mut self, mirror: &Mirror) -> Result<(), AppError> {
         let s = self.formatter.format_mirror(&mirror);
-        println!("{}", &s);
+        self.write_stdout_line(&s)?;
         if let Some(output_lines) = &mut self.output_lines {
             output_lines.push(s);
         }
+        self.mirror_count += 1;
+        Ok(())
     }
 
     pub fn save_to_file(&mut self) -> Result<(), io::Error> {
@@ -127,6 +143,13 @@ fn valid_pacman_line(line: &str) -> bool {
         && !url.chars().any(|ch| ch.is_whitespace())
 }
 
+fn apply_base_path_override(mirrors: &mut [Mirror], base_path: &str) -> Result<(), AppError> {
+    for mirror in mirrors {
+        mirror.url_to_test = mirror.url.join(&format!("{}.files", base_path))?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -146,7 +169,9 @@ mod tests {
     #[test]
     fn multiline_diagnostic_stays_commented_in_saved_output() {
         let mut output = OutputSink::new(&TestFormatter, Some("unused"), true, true, true).unwrap();
-        output.display_comment("[WARN] bad archive\n<html>\r\n<head>");
+        output
+            .display_comment("[WARN] bad archive\n<html>\r\n<head>")
+            .unwrap();
         assert_eq!(
             output.output_lines.unwrap(),
             vec!["# [WARN] bad archive", "# <html>", "# <head>"]
@@ -176,20 +201,43 @@ mod tests {
             io::ErrorKind::InvalidData
         );
     }
+
+    #[test]
+    fn base_path_override_updates_both_probe_urls() {
+        let mut mirrors = vec![Mirror {
+            url: url::Url::parse("https://mirror.example/repo/").unwrap(),
+            url_to_test: url::Url::parse("https://mirror.example/repo/old.files").unwrap(),
+            country: None,
+        }];
+        apply_base_path_override(&mut mirrors, "x86_64/cachyos/cachyos").unwrap();
+        assert_eq!(
+            mirrors[0].url_to_test.as_str(),
+            "https://mirror.example/repo/x86_64/cachyos/cachyos.files"
+        );
+        assert_eq!(
+            mirrors[0].database_url().unwrap().as_str(),
+            "https://mirror.example/repo/x86_64/cachyos/cachyos.db"
+        );
+    }
 }
 
 fn main() -> Result<(), AppError> {
-    let config = Arc::new(Config::parse());
+    match run() {
+        Err(AppError::StdoutBrokenPipe) => Ok(()),
+        result => result,
+    }
+}
+
+fn run() -> Result<(), AppError> {
+    let config = Arc::new(Config::new());
     if !config.allow_root && Uid::effective().is_root() {
         return Err(AppError::Root);
     }
     let max_mirrors_to_output = config.max_mirrors_to_output.clone();
     let pacman_mirrorlist = !matches!(&config.target, Target::Stdin(_) | Target::OpenBSD(_));
-    let require_verified_freshness = config.freshness_check.is_enabled()
-        && !matches!(
-            &config.target,
-            Target::Stdin(_) | Target::OpenBSD(_) | Target::ArcoLinux(_)
-        );
+    let require_verified_freshness =
+        config.freshness_check.is_enabled() && config.target.supports_freshness();
+    let disable_untested_fallback = config.disable_untested_fallback;
 
     let ref formatter = Arc::clone(&config).target;
     let mut output = OutputSink::new(
@@ -200,19 +248,82 @@ fn main() -> Result<(), AppError> {
         pacman_mirrorlist,
     )?;
 
-    output.display_comment(format!("STARTED AT: {}", Local::now()));
-    output.display_comment(format!("ARGS: {}", env::args().join(" ")));
+    output.display_comment(format!("STARTED AT: {}", Local::now()))?;
+    output.display_comment(format!("VERSION: {}", env!("CARGO_PKG_VERSION")))?;
+    output.display_comment(format!("ARGS: {}", env::args().join(" ")))?;
 
     let (tx_progress, rx_progress) = mpsc::channel::<String>();
     let (tx_results, rx_results) = mpsc::channel::<SpeedTestResults>();
     let (tx_mirrors, rx_mirrors) = mpsc::channel::<Mirror>();
 
     let thread_handle = thread::spawn(move || -> Result<(), AppError> {
-        let mirrors = config
-            .target
-            .fetch_mirrors(Arc::clone(&config), tx_progress.clone())?;
+        let mut mirrors = config.target.fetch_mirrors(tx_progress.clone())?;
 
-        // sending untested mirrors back so we have a fallback in case if all tests fail
+        // Keep upstream target-specific .files paths by default. A global
+        // --base-path override retains this fork's repository-path option.
+        if let Some(base_path) = &config.base_path {
+            if config.target.supports_freshness() {
+                apply_base_path_override(&mut mirrors, base_path)?;
+            }
+        }
+
+        // Centralized protocol filtering
+        let before_protocol = mirrors.len();
+        mirrors.retain(|m| config.is_protocol_allowed_for_url(&m.url));
+        if mirrors.len() < before_protocol {
+            tx_progress
+                .send(format!(
+                    "PROTOCOL FILTER: {} -> {} mirrors",
+                    before_protocol,
+                    mirrors.len()
+                ))
+                .unwrap();
+        }
+
+        // Country filtering before dedup so excluded-country duplicates
+        // don't shadow valid mirrors from non-excluded countries
+        let before_country = mirrors.len();
+        mirrors.retain(|m| !config.is_country_excluded(m.country.map(|c| c.code).unwrap_or("zz")));
+        if mirrors.len() < before_country {
+            tx_progress
+                .send(format!(
+                    "COUNTRY FILTER: {} -> {} mirrors",
+                    before_country,
+                    mirrors.len()
+                ))
+                .unwrap();
+        }
+
+        // Prefer https over http when both are available for the same host
+        mirrors.sort_by_key(|m| match m.url.scheme() {
+            "https" => 0,
+            "http" => 1,
+            _ => 2,
+        });
+
+        // Deduplicate mirrors by host+port+path (keeps first = preferred protocol)
+        let before_dedup = mirrors.len();
+        let mut seen = std::collections::HashSet::new();
+        mirrors.retain(|m| {
+            let key = format!(
+                "{}{}{}",
+                m.url.host_str().unwrap_or(""),
+                m.url.port().map(|p| format!(":{}", p)).unwrap_or_default(),
+                m.url.path()
+            );
+            seen.insert(key)
+        });
+        if mirrors.len() < before_dedup {
+            tx_progress
+                .send(format!(
+                    "DEDUP: {} -> {} mirrors",
+                    before_dedup,
+                    mirrors.len()
+                ))
+                .unwrap();
+        }
+
+        // sending filtered mirrors back so we have a fallback in case if all tests fail
         for mirror in mirrors.iter().cloned() {
             tx_mirrors.send(mirror).unwrap();
         }
@@ -226,7 +337,7 @@ fn main() -> Result<(), AppError> {
     });
 
     for progress in rx_progress.into_iter() {
-        output.display_comment(progress);
+        output.display_comment(progress)?;
     }
 
     thread_handle.join().unwrap()?;
@@ -239,21 +350,25 @@ fn main() -> Result<(), AppError> {
         }
         let untested_mirrors: Vec<Mirror> = rx_mirrors.into_iter().collect();
         if untested_mirrors.len() == 0 {
-            output.display_comment("==== NO MIRRORS AFTER FILTERING ====");
+            output.display_comment("==== NO MIRRORS AFTER FILTERING ====")?;
             return Err(AppError::NoMirrorsAfterFiltering);
         }
-        output.display_comment("==== FAILED TO TEST SPEEDS, RETURNING UNTESTED MIRRORS ====");
+        if disable_untested_fallback {
+            output.display_comment("==== ALL SPEED TESTS FAILED ====")?;
+            return Err(AppError::SpeedTestsFailed);
+        }
+        output.display_comment("==== FAILED TO TEST SPEEDS, RETURNING UNTESTED MIRRORS ====")?;
         for mirror in untested_mirrors.into_iter() {
-            output.display_mirror(&mirror);
+            output.display_mirror(&mirror)?;
         }
     } else {
-        output.display_comment("==== RESULTS (ranked mirrors) ====");
+        output.display_comment("==== RESULTS (ranked mirrors) ====")?;
 
         for (index, result) in results.iter().enumerate() {
-            output.display_comment(format!("{:>3}. {}", index + 1, result));
+            output.display_comment(format!("{:>3}. {}", index + 1, result))?;
         }
 
-        output.display_comment(format!("FINISHED AT: {}", Local::now()));
+        output.display_comment(format!("FINISHED AT: {}", Local::now()))?;
 
         let it: Box<dyn Iterator<Item = SpeedTestResult>> = match max_mirrors_to_output {
             Some(n) => Box::new(results.into_iter().take(n)),
@@ -261,10 +376,13 @@ fn main() -> Result<(), AppError> {
         };
 
         for result in it {
-            output.display_mirror(&result.item);
+            output.display_mirror(&result.item)?;
         }
     }
 
+    if output.mirror_count == 0 {
+        return Err(AppError::BlankOutput);
+    }
     output.save_to_file()?;
     Ok(())
 }

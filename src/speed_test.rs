@@ -1,6 +1,6 @@
 extern crate byte_unit;
 extern crate reqwest;
-use crate::config::Config;
+use crate::config::{Config, default_client_builder};
 use crate::countries::{Country, LinkTo, LinkType};
 use crate::freshness;
 use crate::mirror::Mirror;
@@ -278,18 +278,12 @@ async fn test_single_mirror(
     tx_progress.send(format!("{}", speed_test_result)).unwrap();
 
     if check_freshness {
-        if let Some(base_path) = &speed_test_result.item.base_path {
+        if let Some(db_url) = speed_test_result.item.database_url() {
             let check_result = match reference {
                 Some(Ok(reference)) => {
                     let _permit = freshness_semaphore.acquire().await.unwrap();
-                    freshness::check_mirror(
-                        client,
-                        speed_test_result.item.url.clone(),
-                        base_path,
-                        reference,
-                        config.freshness_timeout,
-                    )
-                    .await
+                    freshness::check_mirror(client, db_url, reference, config.freshness_timeout)
+                        .await
                 }
                 Some(Err(error)) => freshness::FreshnessCheckResult::reference_error(error),
                 None => freshness::FreshnessCheckResult::reference_error(
@@ -349,9 +343,8 @@ fn test_mirrors<T: IntoIterator<Item = Mirror>>(
     let mut handles = Vec::new();
     for mirror in mirrors.into_iter() {
         let reference = mirror
-            .base_path
-            .as_ref()
-            .and_then(|base_path| references.get(base_path).cloned());
+            .repository_base_path()
+            .and_then(|base_path| references.get(&base_path).cloned());
         handles.push(runtime.spawn(test_single_mirror(
             mirror,
             client.clone(),
@@ -410,13 +403,15 @@ pub fn test_speed_by_countries(
 ) {
     let mut references: HashMap<String, Result<Arc<freshness::PackageBuildDates>, String>> =
         HashMap::new();
-    if config.freshness_check.is_enabled() {
+    let freshness_enabled =
+        config.freshness_check.is_enabled() && config.target.supports_freshness();
+    if freshness_enabled {
         for mirror in &mirrors {
-            if let Some(base_path) = &mirror.base_path {
+            if let Some(base_path) = mirror.repository_base_path() {
                 references.entry(base_path.clone()).or_insert_with(|| {
                     freshness::load_reference_db(
                         &config.ref_local_dir,
-                        &freshness::reference_db_filename(base_path),
+                        &freshness::reference_db_filename(&base_path),
                     )
                     .map(Arc::new)
                 });
@@ -436,7 +431,7 @@ pub fn test_speed_by_countries(
         }
     }
     let runtime = tokio::runtime::Runtime::new().unwrap();
-    let client = Client::new();
+    let client = default_client_builder().expect("failed to build HTTP client");
     let semaphore = Arc::new(tokio::sync::Semaphore::new(config.concurrency));
     let freshness_semaphore = Arc::new(tokio::sync::Semaphore::new(8));
 
@@ -499,7 +494,11 @@ pub fn test_speed_by_countries(
                 };
 
                 let mut links: Vec<_> = if !explored {
-                    country.links.iter().collect()
+                    country
+                        .links
+                        .iter()
+                        .filter(|link| !config.is_country_excluded(link.code))
+                        .collect()
                 } else {
                     Vec::new()
                 };
@@ -567,7 +566,7 @@ pub fn test_speed_by_countries(
             Arc::clone(&semaphore),
             Arc::clone(&freshness_semaphore),
             mpsc::Sender::clone(&tx_progress),
-            config.freshness_check.is_enabled(),
+            freshness_enabled,
         );
         jumps_number += 1;
 
@@ -720,7 +719,7 @@ pub fn test_speed_by_countries(
             Arc::clone(&semaphore_for_unlabeled),
             Arc::clone(&freshness_semaphore),
             mpsc::Sender::clone(&tx_progress),
-            config.freshness_check.is_enabled(),
+            freshness_enabled,
         );
 
         results.sort_unstable_by(|a, b| b.speed.partial_cmp(&a.speed).unwrap());
@@ -743,10 +742,10 @@ pub fn test_speed_by_countries(
     let mut top_mirror_results = speed_test_results;
 
     // Check every speed-verified mirror's DB before selecting retest candidates.
-    if config.freshness_check.is_enabled()
+    if freshness_enabled
         && top_mirror_results
             .iter()
-            .any(|result| result.item.base_path.is_some())
+            .any(|result| result.item.repository_base_path().is_some())
     {
         let frontier = freshness::build_frontier(
             references
@@ -876,6 +875,12 @@ pub fn test_speed_by_countries(
     }
 
     tx_results.send(top_mirror_results).unwrap();
+
+    // Drop channels before shutting down the runtime. Without this runtime drop can block
+    // indefinitely (e.g. reqwest connection-pool cleanup)
+    drop(tx_progress);
+    drop(tx_results);
+    runtime.shutdown_timeout(Duration::from_secs(1));
 }
 
 fn freshness_quality(age_days: f64, missing: usize, total: usize) -> f64 {
@@ -979,7 +984,6 @@ mod freshness_order_tests {
             url: url.clone(),
             url_to_test: url,
             country: None,
-            base_path: Some("test/repo".to_string()),
         };
         let mut result = SpeedTestResult::new(
             mirror,

@@ -10,15 +10,37 @@ pub struct CachyOSTarget {
     )]
     pub fetch_mirrors_timeout: u64,
 
-        /// Base path to repository resources (used for both speed test .files and freshness .db)
-        ///   Example: "x86_64/cachyos/cachyos"
-        #[arg(
-            env = "RATE_MIRRORS_BASE_PATH",
-            long,
-            default_value = "x86_64/cachyos/cachyos",
-            verbatim_doc_comment
-        )]
-        pub base_path: String,
+    /// Either url or path to a CachyOS mirror source.
+    ///   Accepts the dashboard JSON API response or a plain pacman
+    ///   mirrorlist file.
+    #[arg(
+        env = "RATE_MIRRORS_MIRROR_LIST_FILE",
+        long,
+        default_value = "https://cachyos.org/archlinuxmirrorlist/api/cachyos-mirrors",
+        verbatim_doc_comment
+    )]
+    pub mirror_list_file: String,
+
+    /// Max acceptable delay in seconds since the mirror was last synced
+    ///   (only applied to the JSON API source, which reports per-mirror)
+    #[arg(
+        env = "RATE_MIRRORS_MAX_DELAY",
+        long,
+        default_value = "86400",
+        verbatim_doc_comment
+    )]
+    pub max_delay: i64,
+
+    /// Path to be joined to a mirror url and used for speed testing
+    ///   the file should be big enough to allow for testing high
+    ///   speed connections
+    #[arg(
+        env = "RATE_MIRRORS_PATH_TO_TEST",
+        long,
+        default_value = "x86_64/cachyos/cachyos.files",
+        verbatim_doc_comment
+    )]
+    pub path_to_test: String,
 
     /// Architecture
     #[arg(env = "RATE_MIRRORS_ARCH", long, default_value = "auto")]

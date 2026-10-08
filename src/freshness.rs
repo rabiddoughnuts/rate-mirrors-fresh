@@ -62,16 +62,10 @@ impl PackageBuildDates {
 
 pub async fn check_mirror(
     client: Client,
-    mirror_url: Url,
-    base_path: &str,
+    db_url: Url,
     reference: Arc<PackageBuildDates>,
     timeout_ms: u64,
 ) -> FreshnessCheckResult {
-    let db_url: Url = match mirror_url.join(&format!("{}.db", base_path)) {
-        Ok(u) => u,
-        Err(e) => return FreshnessCheckResult::failed(format!("failed to build db url: {}", e)),
-    };
-
     let fetch = async {
         let mut resp = client
             .get(db_url.clone())

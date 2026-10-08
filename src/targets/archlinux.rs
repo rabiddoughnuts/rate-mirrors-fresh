@@ -1,19 +1,20 @@
-use crate::config::{AppError, Config, FetchMirrors, LogFormatter};
+use crate::config::{AppError, FetchMirrors, LogFormatter, fetch_json_or_file};
 use crate::countries::Country;
 use crate::mirror::Mirror;
 use crate::target_configs::archlinux::{ArchMirrorsSortingStrategy, ArchTarget};
 use rand::prelude::SliceRandom;
 use rand::rng;
-use reqwest;
 use serde::Deserialize;
 use std::fmt::Display;
-use std::sync::{mpsc, Arc};
-use std::time::Duration;
-use tokio::runtime::Runtime;
+use std::sync::mpsc;
 use url::Url;
+
+pub(crate) const ARCH_TIER_1_MIRROR_SOURCE: &str =
+    "https://archlinux.org/mirrors/status/tier/1/json/";
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct ArchMirror {
+    #[allow(dead_code)]
     protocol: String,
     url: String,
     score: Option<f64>,
@@ -38,88 +39,90 @@ impl LogFormatter for ArchTarget {
     }
 }
 
-impl FetchMirrors for ArchTarget {
-    fn fetch_mirrors(
-        &self,
-        config: Arc<Config>,
-        tx_progress: mpsc::Sender<String>,
-    ) -> Result<Vec<Mirror>, AppError> {
-        let url = if self.fetch_first_tier_only {
-            "https://archlinux.org/mirrors/status/tier/1/json/"
-        } else {
-            "https://archlinux.org/mirrors/status/json/"
-        };
+pub(crate) fn selected_mirror_source(target: &ArchTarget) -> &str {
+    if target.fetch_first_tier_only {
+        ARCH_TIER_1_MIRROR_SOURCE
+    } else {
+        &target.mirror_source
+    }
+}
 
-        let mirrors_data = Runtime::new().unwrap().block_on(async {
-            Ok::<_, AppError>(
-                reqwest::Client::new()
-                    .get(url)
-                    .timeout(Duration::from_millis(self.fetch_mirrors_timeout))
-                    .send()
-                    .await?
-                    .json::<ArchMirrorsData>()
-                    .await?,
-            )
-        })?;
+pub(crate) fn fetch_archweb_mirrors(
+    source: &str,
+    timeout_ms: u64,
+    completion: f64,
+    max_delay: i64,
+    sort: &ArchMirrorsSortingStrategy,
+    path_to_test: &str,
+    tx_progress: mpsc::Sender<String>,
+) -> Result<Vec<Mirror>, AppError> {
+    let mirrors_data: ArchMirrorsData = fetch_json_or_file(source, timeout_ms)?;
 
-        tx_progress
-            .send(format!("FETCHED MIRRORS: {}", mirrors_data.urls.len()))
-            .unwrap();
+    tx_progress
+        .send(format!("FETCHED MIRRORS: {}", mirrors_data.urls.len()))
+        .unwrap();
 
-        let mut mirrors: Vec<_> = mirrors_data
-            .urls
-            .into_iter()
-            .filter(|mirror| {
-                if let Some(completion_pct) = mirror.completion_pct {
-                    if let Some(delay) = mirror.delay {
-                        if let Ok(protocol) = mirror.protocol.parse() {
-                            return completion_pct >= self.completion
-                                && delay <= self.max_delay
-                                && config.is_protocol_allowed(&protocol)
-                                && !mirror.country_code.is_empty();
-                        }
-                    }
+    let mut mirrors: Vec<_> = mirrors_data
+        .urls
+        .into_iter()
+        .filter(|mirror| {
+            if let Some(completion_pct) = mirror.completion_pct {
+                if let Some(delay) = mirror.delay {
+                    return completion_pct >= completion && delay <= max_delay;
                 }
-                false
-            })
-            .collect();
+            }
+            false
+        })
+        .collect();
 
-        match &self.sort_mirrors_by {
-            ArchMirrorsSortingStrategy::Random => {
-                let mut _rng = rng();
-                mirrors.shuffle(&mut _rng);
-            }
-            ArchMirrorsSortingStrategy::DelayDesc => {
-                mirrors.sort_unstable_by(|a, b| b.delay.partial_cmp(&a.delay).unwrap());
-            }
-            ArchMirrorsSortingStrategy::DelayAsc => {
-                mirrors.sort_unstable_by(|a, b| a.delay.partial_cmp(&b.delay).unwrap());
-            }
-            ArchMirrorsSortingStrategy::ScoreDesc => {
-                mirrors.sort_unstable_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
-            }
-            ArchMirrorsSortingStrategy::ScoreAsc => {
-                mirrors.sort_unstable_by(|a, b| a.score.partial_cmp(&b.score).unwrap());
-            }
-        };
+    match sort {
+        ArchMirrorsSortingStrategy::Random => {
+            let mut _rng = rng();
+            mirrors.shuffle(&mut _rng);
+        }
+        ArchMirrorsSortingStrategy::DelayDesc => {
+            mirrors.sort_unstable_by(|a, b| b.delay.partial_cmp(&a.delay).unwrap());
+        }
+        ArchMirrorsSortingStrategy::DelayAsc => {
+            mirrors.sort_unstable_by(|a, b| a.delay.partial_cmp(&b.delay).unwrap());
+        }
+        ArchMirrorsSortingStrategy::ScoreDesc => {
+            mirrors.sort_unstable_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
+        }
+        ArchMirrorsSortingStrategy::ScoreAsc => {
+            mirrors.sort_unstable_by(|a, b| a.score.partial_cmp(&b.score).unwrap());
+        }
+    };
 
-        let result: Vec<_> = mirrors
-            .into_iter()
-            .filter_map(|m| {
-                if let Ok(url) = Url::parse(&m.url) {
-                        if let Ok(url_to_test) = url.join(&format!("{}.files", self.base_path)) {
-                        return Some(Mirror {
-                            country: Country::from_str(&m.country_code),
-                            url,
-                            url_to_test,
-                            base_path: Some(self.base_path.clone()),
-                        });
-                    }
-                };
-                None
-            })
-            .collect();
+    let result: Vec<_> = mirrors
+        .into_iter()
+        .filter_map(|m| {
+            if let Ok(url) = Url::parse(&m.url) {
+                if let Ok(url_to_test) = url.join(path_to_test) {
+                    return Some(Mirror {
+                        country: Country::from_str(&m.country_code),
+                        url,
+                        url_to_test,
+                    });
+                }
+            };
+            None
+        })
+        .collect();
 
-        Ok(result)
+    Ok(result)
+}
+
+impl FetchMirrors for ArchTarget {
+    fn fetch_mirrors(&self, tx_progress: mpsc::Sender<String>) -> Result<Vec<Mirror>, AppError> {
+        fetch_archweb_mirrors(
+            selected_mirror_source(self),
+            self.fetch_mirrors_timeout,
+            self.completion,
+            self.max_delay,
+            &self.sort_mirrors_by,
+            &self.path_to_test,
+            tx_progress,
+        )
     }
 }

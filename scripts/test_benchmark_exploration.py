@@ -65,7 +65,7 @@ class BenchmarkTests(unittest.TestCase):
                  "ended_utc": row["ended_utc"], "location": bench.approximate_location(False),
                  "entry_country": "US", "entry_country_source": "fallback US",
                  "target": "arch", "repeats": 1, "top": 2, "freshness_weight": 0.5,
-                 "binary": {"version": "rate-mirrors config 0.23.0", "sha256": "abc"}},
+                 "binary": {"version": "rate-mirrors config 0.33.0", "sha256": "abc"}},
                   "summary": [], "runs": [row]}
         markdown = bench.markdown_report(report)
         self.assertIn("Speed ranking", markdown)
@@ -94,6 +94,17 @@ class BenchmarkTests(unittest.TestCase):
         self.assertNotIn("ip", location)
         self.assertNotIn("203.0.113.7", json.dumps(location))
         self.assertEqual(bench.approximate_location(False)["status"], "skipped")
+
+    def test_incomplete_instrumentation_is_not_valid(self):
+        row = {"exit_code": 0, "timed_out": False, "retest_probes": 0,
+               "selected_order": [{"url": "https://a.example/"}],
+               "freshness_ranked_mirrors": [{"url": "https://a.example/"}],
+               "instrumentation_missing": True}
+        self.assertFalse(bench.valid(row))
+        row["instrumentation_missing"] = False
+        self.assertTrue(bench.valid(row))
+        row["freshness_ranked_mirrors"] = []
+        self.assertFalse(bench.valid(row))
 
     def test_incremental_comparison(self):
         def row(value, attempted, speeds, elapsed, top):

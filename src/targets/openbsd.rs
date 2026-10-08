@@ -1,12 +1,9 @@
-use crate::config::{AppError, Config, FetchMirrors, LogFormatter};
+use crate::config::{AppError, FetchMirrors, LogFormatter, fetch_text_or_file};
 use crate::countries::Country;
 use crate::mirror::Mirror;
 use crate::target_configs::openbsd::OpenBSDTarget;
-use reqwest;
 use std::fmt::Display;
-use std::sync::{mpsc, Arc};
-use std::time::Duration;
-use tokio::runtime::Runtime;
+use std::sync::mpsc;
 use url::Url;
 
 impl LogFormatter for OpenBSDTarget {
@@ -20,24 +17,8 @@ impl LogFormatter for OpenBSDTarget {
 }
 
 impl FetchMirrors for OpenBSDTarget {
-    fn fetch_mirrors(
-        &self,
-        config: Arc<Config>,
-        _tx_progress: mpsc::Sender<String>,
-    ) -> Result<Vec<Mirror>, AppError> {
-        let url = "https://ftp.openbsd.org/pub/OpenBSD/ftplist";
-
-        let output = Runtime::new().unwrap().block_on(async {
-            Ok::<_, AppError>(
-                reqwest::Client::new()
-                    .get(url)
-                    .timeout(Duration::from_millis(self.fetch_mirrors_timeout))
-                    .send()
-                    .await?
-                    .text_with_charset("utf-8")
-                    .await?,
-            )
-        })?;
+    fn fetch_mirrors(&self, _tx_progress: mpsc::Sender<String>) -> Result<Vec<Mirror>, AppError> {
+        let output = fetch_text_or_file(&self.mirror_source, self.fetch_mirrors_timeout)?;
 
         let urls = output
             .lines()
@@ -53,12 +34,6 @@ impl FetchMirrors for OpenBSDTarget {
                 Url::parse(&url_part)
                     .ok()
                     .map(|url| (url, description_part))
-            })
-            .filter(|(url, _description_part)| {
-                url.scheme()
-                    .parse()
-                    .map(|p| config.is_protocol_allowed(&p))
-                    .unwrap_or(false)
             });
 
         let result: Vec<_> = urls
@@ -87,7 +62,6 @@ impl FetchMirrors for OpenBSDTarget {
                         country: Country::from_str(country),
                         url,
                         url_to_test,
-                        base_path: None,
                     })
             })
             .collect();
